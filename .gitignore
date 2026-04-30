@@ -1,0 +1,20 @@
+# Backend
+backend/venv/
+backend/__pycache__/
+backend/.pytest_cache/
+backend/.env
+backend/*.sqlite3
+*.pyc
+
+# Frontend
+Frontend/node_modules/
+Frontend/.next/
+Frontend/out/
+Frontend/build/
+Frontend/.env*.local
+
+# System
+.DS_Store
+Thumbs.db
+.claude/
+.agents/
