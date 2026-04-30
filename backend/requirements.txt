@@ -4,7 +4,7 @@ python-multipart
 pydantic>=2.7
 pydantic-settings>=2.3
 supabase>=2.5
-qdrant-client>=1.9
+qdrant-client[fastembed]>=1.9
 openai>=1.35
 llama-parse>=0.5
 tiktoken>=0.7
