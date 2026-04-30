@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     # App
     default_tenant_id: UUID = UUID("00000000-0000-0000-0000-000000000000")
     ingestion_concurrency: int = 3
+    cors_origins: str = "*"
 
     # Models
     foreground_model: str = "gpt-5.4-mini"
