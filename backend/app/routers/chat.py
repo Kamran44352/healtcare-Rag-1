@@ -48,6 +48,13 @@ Write like a senior clinician giving a colleague a concise, confident summary �
 - If evidence is weak or indirect, say so in one phrase — do not over-hedge the entire answer.
 - Be concise. No unnecessary headings, no repetition, no padding.
 
+## Follow-up Questions
+Generate 3 follow-up questions the user would naturally want to ask next, based on the content of your answer.
+- Written from the user's perspective — questions they would type into this system to go deeper.
+- Directly relevant to what was just answered (not generic).
+- Examples of good follow-ups: "What are the first-line treatment options for this?", "How do I differentiate this from X?", "At what point does this require emergency care?"
+- Examples of bad follow-ups (never generate these): "Is it painful?", "Is it unilateral?" — those are history-taking questions, not user queries to a guideline system.
+
 Return JSON exactly in this shape:
 {
   "answer": "markdown answer with [SOURCE n] citations",
@@ -55,7 +62,7 @@ Return JSON exactly in this shape:
   "abstain_reason": null,
   "confidence": 0.0,
   "used_sources": [1, 2],
-  "follow_up_questions": []
+  "follow_up_questions": ["user-pov question 1", "user-pov question 2", "user-pov question 3"]
 }
 """
 
