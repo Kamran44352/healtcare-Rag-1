@@ -8,6 +8,7 @@ import { PromptInput } from "@/components/ai-elements/prompt-input";
 import { Response } from "@/components/ai-elements/response";
 import { Thinking } from "@/components/ai-elements/thinking";
 import { Message } from "@/components/ai-elements/message";
+import { AgentTrace, type TraceStep } from "@/components/ai-elements/agent-trace";
 import { cn } from "@/lib/utils";
 import { chatQuery, chatQueryStream, submitFeedback } from "@/lib/api";
 import type { ChatMessage, ChatResponse, Citation } from "@/lib/types";
@@ -26,6 +27,11 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
   const [ratings, setRatings] = useState<Record<string, Rating>>({});
   const [expandedCitations, setExpandedCitations] = useState<Set<string>>(new Set());
 
+  // Agent trace state
+  const [traceSteps, setTraceSteps] = useState<TraceStep[]>([]);
+  const [traceRunning, setTraceRunning] = useState(false);
+  const [currentTraceName, setCurrentTraceName] = useState<string>("");
+
   const toggleCitationExpanded = (chunkId: string) => {
     setExpandedCitations((prev) => {
       const next = new Set(prev);
@@ -35,7 +41,7 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
     });
   };
 
-  const stripMarkdown = (text: string) => (text || "").replace(/\*\*|__|\*|_|~~|`/g, "").trim();
+  const stripMarkdown = (text: string) => (text || "").replace(/\*\*|__|\\*|_|~~|`/g, "").trim();
   const liveIdRef = useRef<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const liveMessageRef = useRef<HTMLDivElement | null>(null);
@@ -45,24 +51,20 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
     if (!messages.length) return;
     const last = messages[messages.length - 1];
     if (last.role === "user") {
-      // New user message: scroll to bottom to show it + upcoming thinking indicator
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
       didScrollToAnswerRef.current = false;
       return;
     }
     if (last.role === "assistant" && last.id === liveIdRef.current) {
       if (!last.content) {
-        // Empty placeholder (Thinking...) — scroll to bottom to show it
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
         return;
       }
-      // First content delta: scroll to the TOP of the answer so the user reads from the beginning
       if (!didScrollToAnswerRef.current) {
         didScrollToAnswerRef.current = true;
         liveMessageRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
       }
     }
-    // All other updates (streaming deltas, citations, follow-ups) — no auto-scroll
   }, [messages]);
 
   const formatStreamingMarkdown = (input: string) => String(input || "").replace(/\r\n/g, "\n");
@@ -103,11 +105,27 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
     setMessages((prev) => [...prev, { id: liveId, role: "assistant", content: "" }]);
   };
 
+  // ── Next stage names for the "running" indicator ──
+  const NEXT_STAGE: Record<string, string> = {
+    classify_intent: "Extracting clinical filters...",
+    extract_filters: "Searching guidelines...",
+    retrieve: "Evaluating relevance...",
+    grade_chunks: "Generating answer...",
+    rewrite_query: "Re-searching guidelines...",
+    generate_answer: "Verifying citations...",
+    verify_grounding: "Finalizing...",
+  };
+
   const sendMessage = async (overrideQuestion?: string) => {
     const text = (overrideQuestion ?? question).trim();
     if (!text || loading) return;
     setQuestion("");
     setLoading(true);
+
+    // Reset trace state
+    setTraceSteps([]);
+    setTraceRunning(true);
+    setCurrentTraceName("Analyzing question...");
 
     setMessages((prev) => [...prev, { id: `u-${Date.now()}`, role: "user", content: text }]);
     startLiveAssistant();
@@ -135,6 +153,49 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
 
     try {
       const response: ChatResponse = await chatQueryStream(baseUrl, payload, {
+        onStepStarted: (stage, data) => {
+          console.log("onStepStarted", stage);
+          const step: TraceStep = {
+            stage,
+            label: String(data.label || stage),
+            description: String(data.description || ""),
+            status: "running",
+            ms: 0,
+          };
+          setTraceSteps((prev) => [...prev, step]);
+        },
+        onStage: (stage, data) => {
+          console.log("onStage", stage, data);
+          const completedStep: TraceStep = {
+            stage,
+            label: String(data.label || stage),
+            description: String(data.description || ""),
+            status: (data.status as "done" | "error") || "done",
+            ms: Number(data.ms || 0),
+            ...data,
+          };
+          setTraceSteps((prev) => {
+            let idx = -1;
+            for (let i = prev.length - 1; i >= 0; i--) {
+              if (prev[i].stage === stage && prev[i].status === "running") {
+                idx = i;
+                break;
+              }
+            }
+            if (idx >= 0) {
+              const next = [...prev];
+              next[idx] = completedStep;
+              return next;
+            }
+            return [...prev, completedStep];
+          });
+          setCurrentTraceName(NEXT_STAGE[stage] || "Processing...");
+
+          if (stage === "verify_grounding") {
+            setTraceRunning(false);
+            setCurrentTraceName("");
+          }
+        },
         onAnswerDelta: (delta) => {
           hasStreamedDelta = true;
           streamedContent += delta;
@@ -142,11 +203,6 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
         },
         onCitationsReady: (citations) => {
           if (hasStreamedDelta) flushStreamRender();
-          // Remap [SOURCE n] tags in the answer to sequential 1, 2, 3... matching the citation box order.
-          // citations[] is ordered by first appearance in the answer (from _extract_citation_refs).
-          // source_index is the original LLM number (e.g. SOURCE 4). We build an exact map so that
-          // [SOURCE 4] → [SOURCE 2] if source_index=4 is at citations[1]. This ensures badge [n] always
-          // points to the content of "Source n" in the citation box — accurate, not just positional.
           const sourceIndexToPosition = new Map<number, number>(
             citations.map((c, i) => [c.source_index, i + 1])
           );
@@ -163,6 +219,7 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
       });
       if (hasStreamedDelta) flushStreamRender();
       setSessionId(response.session_id);
+      setTraceRunning(false);
       if (!hasStreamedDelta) {
         upsertLiveAssistant(formatStreamingMarkdown(response.answer));
       }
@@ -174,6 +231,7 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
         followUpQuestions: response.follow_up_questions ?? [],
       });
     } catch (streamError) {
+      setTraceRunning(false);
       if (hasStreamedDelta) {
         flushStreamRender();
         upsertLiveAssistant(`${formatStreamingMarkdown(streamedContent)}\n\n_Stream interrupted before final event._`);
@@ -200,11 +258,10 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
       }
       liveIdRef.current = null;
       setLoading(false);
+      setTraceRunning(false);
     }
   };
 
-  // Toggle: clicking the active rating deselects it; clicking the other one switches.
-  // localId = React state key; backendMessageId = DB UUID used for the API call.
   const setRating = (localId: string, backendMessageId: string | undefined, rating: "up" | "down") => {
     const newRating = ratings[localId] === rating ? null : rating;
     setRatings((prev) => ({ ...prev, [localId]: newRating }));
@@ -218,7 +275,7 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
   const disclaimers = (
     <div className="flex flex-col items-center gap-1 pt-2 text-center">
       <p className="text-[11px] font-medium text-amber-600">⚠ No patient identifiable details please</p>
-      <p className="text-[11px] text-muted-foreground">Clintel can make mistakes — always verify from NICE guidelines</p>
+      <p className="text-[11px] text-muted-foreground">ClinTel can make mistakes — always verify from NICE guidelines</p>
     </div>
   );
 
@@ -252,7 +309,6 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
         <div className="mx-auto max-w-3xl space-y-6 px-4 py-6 sm:px-6">
           {messages.map((message) => {
             const isLiveStreaming = loading && message.id === liveIdRef.current;
-            // Citations arriving during streaming signals the answer is done — use 3-box layout
             const hasCitations = !!message.citations?.length;
             const answerStillStreaming = isLiveStreaming && !hasCitations;
             const showThreeBoxLayout =
@@ -269,25 +325,39 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
               );
             }
 
-            // Streaming assistant message — plain single box (answer still coming in)
+            // Streaming assistant message — show trace + thinking
             if (!showThreeBoxLayout) {
               return (
                 <div key={message.id} ref={message.id === liveIdRef.current ? liveMessageRef : undefined}>
                   <Message role="assistant">
-                    {isLiveStreaming && !message.content ? (
-                      <Thinking label="Thinking..." />
-                    ) : (
+                    {/* Agent Trace — the trace panel has its own "Agent is thinking..." header */}
+                    {isLiveStreaming && (traceSteps.length > 0 || traceRunning) && (
+                      <div className="mb-3">
+                        <AgentTrace
+                          steps={traceSteps}
+                          isRunning={traceRunning}
+                          currentStage={currentTraceName}
+                        />
+                      </div>
+                    )}
+                    {/* Show content once answer starts streaming */}
+                    {message.content ? (
                       <Response
-                        markdown={message.content || "..."}
+                        markdown={message.content}
                         streaming={answerStillStreaming}
                       />
+                    ) : (
+                      /* Only show the basic "Thinking..." if no trace steps yet (before first SSE event) */
+                      isLiveStreaming && traceSteps.length === 0 && !traceRunning ? (
+                        <Thinking label="Connecting..." />
+                      ) : null
                     )}
                   </Message>
                 </div>
               );
             }
 
-            // 3-box layout — shown for completed messages AND streaming messages once citations arrive
+            // 3-box layout — completed messages
             const currentRating = ratings[message.id] ?? null;
 
             return (
@@ -300,7 +370,16 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
                 {/* Three boxes */}
                 <div className="min-w-0 flex-1 space-y-3" style={{ maxWidth: "calc(100% - 44px)" }}>
 
-                  {/* Box 1: Answer + Key Points — solid blue, most prominent */}
+                  {/* Agent Trace (collapsed after completion) */}
+                  {traceSteps.length > 0 && message.id === messages.filter(m => m.role === "assistant").pop()?.id && (
+                    <AgentTrace
+                      steps={traceSteps}
+                      isRunning={false}
+                      currentStage=""
+                    />
+                  )}
+
+                  {/* Box 1: Answer */}
                   <div className="rounded-2xl rounded-tl-sm border-2 border-primary/50 bg-primary/15 px-5 py-4 shadow-sm">
                     <Response markdown={message.content} streaming={answerStillStreaming} />
                     {message.abstained && (
@@ -311,7 +390,7 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
                     )}
                   </div>
 
-                  {/* Box 2: What the Guidelines say — white with blue outline */}
+                  {/* Box 2: Guidelines */}
                   {!!message.citations?.length && (
                     <div className="rounded-xl border-2 border-primary/50 bg-white px-5 py-4 shadow-sm">
                       <p className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-primary/70">
@@ -324,9 +403,6 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
                           const guidelineTitle = meta?.guideline_title || citation.filename;
                           const reference = meta?.reference;
 
-                          // Strip the guideline title prefix from section_path to avoid duplication.
-                          // Case-insensitive comparison because section_path may use different casing.
-                          // section_path format: "Guideline Title (NG136) > subsection"
                           let sectionDisplay = citation.section_path || "";
                           if (sectionDisplay) {
                             const lower = sectionDisplay.toLowerCase();
@@ -345,16 +421,12 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
                               key={citation.chunk_id}
                               className="rounded-xl border border-primary/15 bg-white shadow-sm overflow-hidden"
                             >
-                              {/* Source number header — sequential position matching answer badges after remapping */}
                               <div className="border-b border-primary/10 bg-primary/5 px-4 py-2">
                                 <p className="text-[10px] font-semibold uppercase tracking-widest text-primary/60">
                                   Source {idx + 1}
                                 </p>
                               </div>
-
                               <div className="space-y-2 px-4 py-3">
-                                {/* Quoted snippet — strip markdown; expand to full ~1200 chars on click so the clinician
-                                    sees the same context the LLM saw and can verify the cited claim. */}
                                 {(() => {
                                   const isExpanded = expandedCitations.has(citation.chunk_id);
                                   const previewText = stripMarkdown(citation.snippet);
@@ -377,8 +449,6 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
                                     </>
                                   );
                                 })()}
-
-                                {/* Title (bold, once) + stripped section path */}
                                 <div>
                                   <p className="text-xs font-bold text-foreground">
                                     {guidelineTitle}{reference && ` (${reference})`}
@@ -387,8 +457,6 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
                                     <p className="text-xs text-muted-foreground">› {sectionDisplay}</p>
                                   )}
                                 </div>
-
-                                {/* View guideline — always bottom right */}
                                 {pdfUrl && (
                                   <div className="flex justify-end pt-0.5">
                                     <a
@@ -410,7 +478,7 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
                     </div>
                   )}
 
-                  {/* Feedback bar — direct toggle, no "Change" link */}
+                  {/* Feedback bar */}
                   <div className="flex items-center gap-3 rounded-xl border border-border/70 bg-card px-4 py-3 shadow-sm">
                     <p className="flex-1 text-sm font-medium text-foreground/80">
                       Help us improve — was this helpful?
@@ -443,7 +511,7 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
                     </button>
                   </div>
 
-                  {/* Box 3: Follow-up questions — white with orange outline */}
+                  {/* Box 3: Follow-up questions */}
                   {!!message.followUpQuestions?.length ? (
                     <div className="rounded-xl border-2 border-accent/60 bg-white px-5 py-4 shadow-sm">
                       <p className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-foreground/60">

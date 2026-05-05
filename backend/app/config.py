@@ -51,5 +51,11 @@ class Settings(BaseSettings):
     cohere_api_key: str | None = None
     cohere_rerank_model: str = "rerank-v3.5"
 
+    # Agent (Phase 3)
+    agent_enabled: bool = True
+    agent_coverage_threshold: float = 0.6
+    agent_max_retries: int = 2
+    agent_grounding_threshold: float = 0.5
+
 
 settings = Settings()
