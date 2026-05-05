@@ -157,7 +157,10 @@ export async function searchRetrieval(
   });
 }
 
+// ── SSE Streaming ─────────────────────────────────────────────────────────
+
 type StreamHandlers = {
+  onStepStarted?: (stage: string, data: Record<string, unknown>) => void;
   onStage?: (stage: string, data: Record<string, unknown>) => void;
   onAnswerDelta?: (delta: string) => void;
   onCitationsReady?: (citations: import("@/lib/types").Citation[]) => void;
@@ -194,7 +197,12 @@ export async function chatQueryStream(
 ) {
   const response = await fetch(`${normalizeBaseUrl(baseUrl)}/v1/chat/query/stream`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { 
+      "Content-Type": "application/json",
+      "Accept": "text/event-stream",
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+    },
+    cache: "no-store",
     body: JSON.stringify(payload)
   });
   if (!response.ok || !response.body) {
@@ -209,8 +217,12 @@ export async function chatQueryStream(
 
   const processFrame = (frame: string) => {
     if (!frame) return;
+    // Skip SSE comments (lines starting with :)
+    if (frame.startsWith(":")) return;
     const { eventName, payload: eventPayload } = parseSseFrame(frame);
-    if (eventName === "stage") {
+    if (eventName === "step_started") {
+      handlers.onStepStarted?.(String(eventPayload.stage || ""), eventPayload);
+    } else if (eventName === "stage") {
       const stageName = String(eventPayload.stage || "stage");
       const data = { ...eventPayload };
       delete data.stage;
@@ -225,9 +237,8 @@ export async function chatQueryStream(
       finalResponse = eventPayload as unknown as ChatResponse;
     } else if (eventName === "error") {
       throw new Error(String(eventPayload.message || "Streaming failed"));
-    } else if (eventName === "done") {
-      handlers.onStage?.("done", {});
     }
+    // "done" event is just a sentinel — no action needed
   };
 
   while (true) {
