@@ -31,21 +31,32 @@ def route_after_intent(state: AgentState) -> str:
 
 
 def route_after_grading(state: AgentState) -> str:
-    """Route after grade_chunks: proceed to answer or retry retrieval."""
-    coverage = state.get("coverage_score", 0.5)
-    retries = state.get("retries", 0)
-    threshold = settings.agent_coverage_threshold
+    """Route after grade_chunks: proceed to answer or retry retrieval.
+
+    A retry only makes sense when we have very few chunks — the broad retrieval
+    profile already surfaces the best matching content, so penalising by coverage
+    score alone causes expensive re-queries that rarely improve the answer.
+    """
+    coverage   = state.get("coverage_score", 0.5)
+    retries    = state.get("retries", 0)
+    threshold  = settings.agent_coverage_threshold
+    chunk_count = state.get("chunk_count", 0)
+
+    # Sufficient chunks retrieved — trust the reranker and proceed.
+    # The broad profile with min_rerank_score=0.15 already filtered irrelevant content,
+    # so 4+ chunks passing the reranker means we have useful evidence.
+    if chunk_count >= 4:
+        return "generate_answer"
 
     if coverage >= threshold:
         return "generate_answer"
+
     if retries < settings.agent_max_retries:
         return "rewrite_query"
-    # Max retries exhausted — best-effort answer
+
     log.info("Max retries (%d) reached with coverage %.2f, proceeding to answer", retries, coverage)
     return "generate_answer"
 
-
-# ── Build the graph ────────────────────────────────────────────────────────
 
 def build_agent_graph() -> StateGraph:
     """Construct and compile the LangGraph state machine."""
@@ -199,5 +210,7 @@ async def stream_agent_to_queue(
 
     if final_state:
         await queue.put(("final", final_state))
+
+    await queue.put(("done", None))
 
     await queue.put(("done", None))

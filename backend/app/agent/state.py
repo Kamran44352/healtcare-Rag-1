@@ -17,12 +17,14 @@ class AgentState(TypedDict, total=False):
 
     # ── classify_intent ─────────────────────────────────────────────────
     intent: str                        # "clinical_query" | "greeting" | "out_of_scope" | "clarification"
+    query_intent: str                  # "definition" | "mechanism" | "differential" | "treatment" | "prognosis" | "investigations" | "general"
     intent_confidence: float
 
     # ── extract_filters ─────────────────────────────────────────────────
     extracted_filters: dict[str, Any]
     merged_filters: dict[str, Any]
-    retrieval_query: str               # standalone retrieval query
+    retrieval_query: str               # standalone retrieval query (for logging)
+    retrieval_queries: list[str]       # list of query variants for parallel retrieval
 
     # ── retrieve ────────────────────────────────────────────────────────
     chunks: list[Any]                  # list[RetrievedChunk] — Any to avoid circular import

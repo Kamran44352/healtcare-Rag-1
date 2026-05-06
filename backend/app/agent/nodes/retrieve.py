@@ -9,7 +9,8 @@ from uuid import UUID
 from langchain_core.runnables import RunnableConfig
 
 from app.agent.state import AgentState
-from app.retrieval import RetrievalFilters, retrieve
+from app.retrieval import RetrievalFilters
+from app.retrieval.retriever import retrieve, retrieve_multi
 
 log = logging.getLogger("clintel.agent.retrieve")
 
@@ -20,8 +21,7 @@ async def retrieve_node(state: AgentState, config: RunnableConfig) -> dict[str, 
     if q:
         await q.put(("step_started", {"node": "retrieve"}))
         
-    # Use rewritten query (from retry) if available, else the original extraction query
-    query = state.get("rewritten_query") or state.get("retrieval_query", state["question"])
+    query_intent = state.get("query_intent", "general")
     tenant_id = state["tenant_id"]
     merged_filters = state.get("merged_filters", {})
     top_k = state.get("top_k", 8)
@@ -33,13 +33,23 @@ async def retrieve_node(state: AgentState, config: RunnableConfig) -> dict[str, 
         if field in merged_filters:
             filter_kwargs[field] = merged_filters[field]
     filters = RetrievalFilters(**filter_kwargs) if filter_kwargs else None
+    
+    # Use rewritten query (from retry) if available
+    rewritten = state.get("rewritten_query")
+    if rewritten:
+        queries = [rewritten]
+        rerank_query = rewritten
+    else:
+        queries = state.get("retrieval_queries") or [state.get("retrieval_query", state["question"])]
+        rerank_query = state["question"]
 
     try:
-        result = await retrieve(
-            query,
+        result = await retrieve_multi(
+            queries,
+            rerank_query=rerank_query,
             tenant_id=UUID(str(tenant_id)),
+            query_intent=query_intent,
             filters=filters,
-            profile="specific",
             top_k=top_k,
             expand_parents=True,
         )
@@ -57,13 +67,14 @@ async def retrieve_node(state: AgentState, config: RunnableConfig) -> dict[str, 
         "status": "done",
         "ms": elapsed_ms,
         "data": {
-            "query": str(query)[:120],
+            "queries": [str(q)[:120] for q in queries],
+            "query_intent": query_intent,
             "chunk_count": len(chunks),
             "retrieval_ms": retrieval_ms,
         },
     }
 
-    log.info("Retrieved %d chunks in %dms for query: '%s'", len(chunks), elapsed_ms, query[:80])
+    log.info("Retrieved %d chunks in %dms for queries: %s", len(chunks), elapsed_ms, queries)
 
     return {
         "chunks": chunks,

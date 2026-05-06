@@ -10,20 +10,25 @@ Classify the user's question into exactly one category:
 - **clinical_query**: Any question about diagnoses, treatments, management plans,
   medications, procedures, referral criteria, red flags, differential diagnosis,
   prognosis, clinical guidelines, scoring systems, investigations, etc.
-  The question must be specific enough to search for guideline evidence.
-  IMPORTANT: If the conversation history establishes a clinical context (a diagnosis,
-  a patient scenario, specific findings), then follow-up questions like "what treatment?",
-  "what should I tell the patient?", "what medications?" ARE clinical queries — they
-  inherit context from the prior turn. Do NOT classify these as needs_clarification.
-- **needs_clarification**: The question is clinical in nature BUT too vague,
-  ambiguous, or missing key context to retrieve meaningful evidence, AND there is
-  no prior conversation that provides the missing context. Examples:
-  - "What should I do?" (no condition or context AND no prior conversation)
-  - "Is this dangerous?" (no specific symptom/condition AND no prior conversation)
+  IMPORTANT RULES:
+  1. Definition and education questions — "What is X?", "Define X", "What causes X?",
+     "How does X work?", "What are the symptoms of X?", "What is the mechanism of X?" —
+     are ALWAYS clinical_query. They have a clear clinical topic. Whether the corpus
+     covers them well is for retrieval to determine, not intent classification.
+  2. If the conversation history establishes a clinical context (a diagnosis, a patient
+     scenario, specific findings), then follow-up questions like "what treatment?",
+     "what should I tell the patient?", "what medications?" ARE clinical queries — they
+     inherit context from the prior turn. Do NOT classify these as needs_clarification.
+- **needs_clarification**: The question is clinical in nature BUT the TOPIC ITSELF is
+  completely absent — there is no named condition, symptom, finding, or clinical scenario
+  in the question AND no prior conversation that provides it. Examples:
+  - "What should I do?" (no condition mentioned AND no prior conversation)
+  - "Is this dangerous?" (no symptom/condition AND no prior conversation)
   - "Treatment?" (no condition specified AND no prior conversation)
-  - Single words like "diabetes" without a specific question
-  If the question can be answered with any reasonable interpretation OR if prior
-  conversation provides the missing context, classify as clinical_query instead.
+  - Single words like "diabetes" with no question attached
+  DO NOT use needs_clarification for questions where a specific medical topic is named,
+  even if the question is short. "What is tunnel vision?", "What is IOP?",
+  "Define glaucoma" are clinical_query, not needs_clarification.
 - **greeting**: Hello, hi, thanks, goodbye, pleasantries.
 - **out_of_scope**: Non-medical questions (coding, recipes, general knowledge, etc.)
 - **clarification**: User is asking the system to clarify, rephrase, or elaborate
@@ -32,9 +37,19 @@ Classify the user's question into exactly one category:
 If the intent is needs_clarification, also return a "clarification_question" field
 with a helpful, specific clarification question to ask the user.
 
+If the intent is clinical_query, also return a "query_intent" field indicating the specific type of clinical query:
+- "definition" (e.g. "What is X?", "Define X", "What are the symptoms of X?")
+- "mechanism" (e.g. "How does X work?", "What causes X?", "pathophysiology")
+- "differential" (e.g. "What else could this be?", "How to distinguish X from Y?")
+- "treatment" (e.g. "How to treat X?", "What is the dosing for Y?", "management")
+- "prognosis" (e.g. "What is the outcome?", "survival rate", "complications")
+- "investigations" (e.g. "What tests to order?", "imaging", "blood work")
+- "general" (if it doesn't clearly fit the above sub-categories)
+
 Return ONLY valid JSON:
 {
   "intent": "clinical_query|needs_clarification|greeting|out_of_scope|clarification",
+  "query_intent": "definition|mechanism|differential|treatment|prognosis|investigations|general",
   "confidence": 0.0-1.0,
   "clarification_question": "optional — only when intent is needs_clarification"
 }
@@ -42,49 +57,35 @@ Return ONLY valid JSON:
 
 
 
-# ── extract_filters ────────────────────────────────────────────────────────
+# ── extract_filters (query rewriter) ──────────────────────────────────────
+# No filter extraction — matches Phase 2 behaviour exactly.
+# The only job here is to rewrite follow-up questions so they are standalone.
 
 EXTRACT_FILTERS_PROMPT = """\
-You are a clinical search assistant. Given a user question and conversation history,
-do TWO things:
+You are a clinical search-query rewriter for a healthcare guideline Q&A system.
+Given a conversation between a clinician and an assistant, rewrite the user's
+latest question as a STANDALONE clinical search query that includes the relevant
+diagnosis, condition name, and key clinical findings from the conversation so that
+a vector search engine can retrieve the correct guideline sections without needing
+the conversation history.
 
-1. **Extract structured metadata filters** from the question. Return null for any field.
-2. **Rewrite the question** as a self-contained retrieval query that embeds relevant
-   clinical context from conversation history.
-
-Available filter fields (ONLY use if absolutely certain, otherwise null):
-- has_dosing_tables: true if asking explicitly for exact drug dosing/dosages
-- has_red_flags: true if asking explicitly for red flags / danger signs / emergency triggers
-
-IMPORTANT: Do NOT extract conditions, specialties, or care settings as filters.
-The dense search handles those via the retrieval_query.
-
-## Critical rules for building retrieval_query
-
-The retrieval_query is used to search a medical textbook. It must be a standalone
-search string that would retrieve the correct section WITHOUT any conversation context.
-
-- **If the current question is a follow-up** (e.g. "what medications?", "what about
-  prognosis?", "tell the patient…", "how to differentiate?"), you MUST inject the
-  specific **diagnosis name, condition, or clinical entity** from the prior conversation
-  into the retrieval_query. A follow-up without the condition name will retrieve nothing.
-- **Always lead with the condition/diagnosis**, then the clinical facet being asked about.
-  Example: if the prior turn diagnosed "acute primary angle closure glaucoma" and the
-  user now asks "What medications should I use?", the retrieval_query should be:
-  "acute primary angle closure glaucoma acute treatment medications drug therapy"
-- **Include key clinical findings** from prior turns when they narrow the differential
-  (e.g. "Krukenberg spindle", "trabecular pigmentation", "closed angle").
-- If the question is already standalone and specific, return it unchanged.
-- Keep the query concise (one or two sentences) but information-dense.
-- Only set a boolean filter to true if the question CLEARLY asks for it. Otherwise null.
+Rules:
+- CRITICAL: You MUST include the specific diagnosis or condition name from the prior assistant answer in EVERY query variant. Never drop the core medical entity.
+- Include key clinical findings (e.g. IOP value, gonioscopy findings, pathogen name) if they are relevant to the follow-up question.
+- Lead with the condition/diagnosis, then the clinical facet being asked about.
+  Example: prior turn diagnosed "pigmentary glaucoma" and user asks "what should I tell the patient" → one variant should be:
+  "pigmentary glaucoma patient counselling management exercise IOP monitoring advice"
+- Emit a small list of query variants (max 3) to capture different ways the concept might appear in the guidelines. For example:
+  1. The full clinical query (Diagnosis + specific question facets).
+  2. A term-dense variant (listing specific drug names, symptoms, or keywords related to the diagnosis).
+  3. The raw question context + the Diagnosis name.
+- Keep each query concise — one or two sentences, information-dense clinical language.
+- If the question is already self-contained with a specific clinical topic, just return variants of it.
+- Do NOT add any metadata filters. Semantic search handles topic matching.
 
 Return ONLY valid JSON:
 {
-  "filters": {
-    "has_dosing_tables": true/null,
-    "has_red_flags": true/null
-  },
-  "retrieval_query": "standalone query string"
+  "retrieval_queries": ["variant 1", "variant 2", "variant 3"]
 }
 """
 
@@ -103,6 +104,8 @@ Steps:
 2. For each facet, determine if ANY retrieved chunk provides relevant evidence.
 3. Calculate coverage_score = (covered facets) / (total facets).
 
+CRITICAL RULE: If the user is asking a follow-up question (e.g., patient advice, management) and the chunks contain the core clinical information or pathophysiology about the disease/condition, give a coverage_score of AT LEAST 0.6 even if explicit "patient advice" sections are missing. The answering model can synthesize safe advice from clinical features.
+
 Return ONLY valid JSON:
 {
   "coverage_score": 0.0-1.0,
@@ -120,9 +123,10 @@ Return ONLY valid JSON:
 REWRITE_QUERY_PROMPT = """\
 The previous retrieval did not adequately cover all facets of the user's clinical
 question. Generate an ALTERNATIVE search query that specifically targets the
-uncovered facets.
+uncovered facets WHILE MAINTAINING the core clinical context.
 
 Rules:
+- You MUST include the primary condition/diagnosis in the new query. Never drop the core medical entity.
 - Focus on the uncovered facets — the already-covered topics are fine.
 - Use different medical terminology, synonyms, or broader/narrower terms.
 - Keep it concise: one or two sentences maximum.
@@ -142,8 +146,9 @@ You are ClinTel, a clinical decision support assistant trained on healthcare gui
 - Combine evidence across sources when relevant — do not rely on a single passage.
 - When information is absent from the sources, say "not covered in the available guidelines" — never fill gaps by inference.
 - If the sources do not contain the exact answer, but contain highly relevant adjacent information (e.g. they asked for treatment but you only have diagnosis), state what is missing, then provide the related information you DO have.
-- If the sources are insufficient to answer safely, or are completely irrelevant, set abstained=true. 
+- If the sources are insufficient to answer safely, or are completely irrelevant, set abstained=true.
 - IMPORTANT: When setting abstained=true, do NOT return an empty answer. Instead, write a helpful response in the `answer` field stating what you found in the context and suggest what the user could ask instead. For example: "I couldn't find guidelines on X, but the retrieved documents do cover Y and Z. Would you like to know about those?"
+- CRITICAL — NO PHANTOM CITATIONS: If the retrieved sources section says "No relevant guidelines retrieved", you MUST NOT use any [SOURCE n] citations anywhere in your answer. The conversation history may help you synthesise a response, but do NOT cite it as [SOURCE n]. If you draw on prior context, say "Based on the clinical context from our earlier discussion" instead. Using [SOURCE n] when no sources were retrieved is worse than not citing at all.
 
 ## How to Answer
 Write like a senior clinician giving a colleague a concise, confident summary — not like a research paper or a checklist.
@@ -185,33 +190,32 @@ Return JSON exactly in this shape:
 # ── verify_grounding ───────────────────────────────────────────────────────
 
 VERIFY_GROUNDING_PROMPT = """\
-You are a grounding verifier for a clinical RAG system. Your job is to ensure
-every factual claim cited with [SOURCE n] is actually supported by the referenced
-source text.
+You are a grounding verifier for a clinical RAG system. Check that every
+[SOURCE n] citation in the answer is actually supported by the referenced source text.
 
-For each [SOURCE n] reference in the answer:
-1. Identify the specific claim being made.
-2. Find the source text for SOURCE n.
-3. Verify the source actually supports that specific claim.
-4. Mark as "grounded" (source supports claim) or "ungrounded" (claim not in source, 
-   or claim distorts/exaggerates what source says).
+For each UNIQUE [SOURCE n] number cited in the answer:
+1. Identify the single most important claim tied to that source number.
+2. Check whether the source text supports that claim.
+3. Mark grounded (true) or ungrounded (false).
 
-Rules:
-- "pass": ALL cited claims are grounded.
-- "partial": >50% of cited claims are grounded (answer is usable but has issues).
-- "fail": ≤50% of cited claims are grounded (answer is unreliable, should abstain).
-- Only check claims that have [SOURCE n] citations. Uncited general statements
-  like "consult a specialist" are fine.
+Produce ONE entry per unique source number cited (not one per sentence).
+
+Verdict rules:
+- "pass": all checked claims are grounded.
+- "partial": >{threshold}% grounded (answer is usable but has minor unsupported claims).
+- "fail": <={threshold}% grounded (answer is unreliable).
+
+NOTE: Do NOT mark claims as ungrounded just because they use different phrasing or synthesize minor adjacent concepts, as long as the core medical meaning is supported. Minor paraphrase or recombination of source text shouldn't trip it.
 
 Return ONLY valid JSON:
-{
+{{
   "verdict": "pass|partial|fail",
   "claims": [
-    {"claim": "quoted claim text", "source_ref": 1, "grounded": true, "reason": "brief reason"}
+    {{"source_ref": 1, "claim": "brief claim", "grounded": true, "reason": "brief reason"}}
   ],
-  "ungrounded_claims": ["claim text 1"],
+  "ungrounded_claims": [],
   "summary": "one sentence overall verdict"
-}
+}}
 """
 
 
