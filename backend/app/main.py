@@ -67,6 +67,13 @@ async def lifespan(app: FastAPI):
     set_qdrant(client)
     await _ensure_qdrant_collection(client)
     await get_db()
+    
+    # Warm up Qdrant connection pool
+    try:
+        await client.scroll(collection_name=settings.qdrant_collection, limit=1)
+    except Exception:
+        pass
+        
     yield
     await close_reranker()
     await close_retrieval_cache()

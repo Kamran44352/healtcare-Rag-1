@@ -66,11 +66,13 @@ async def classify_intent(state: AgentState, config: RunnableConfig) -> dict[str
         content = response.choices[0].message.content or "{}"
         parsed = json.loads(content)
         intent = str(parsed.get("intent", "clinical_query"))
+        query_intent = str(parsed.get("query_intent", "general"))
         confidence = float(parsed.get("confidence", 0.8))
         clarification_question = parsed.get("clarification_question")
     except Exception as exc:
         log.warning("classify_intent failed, defaulting to clinical_query: %s", exc)
         intent = "clinical_query"
+        query_intent = "general"
         confidence = 0.5
         clarification_question = None
 
@@ -88,6 +90,7 @@ async def classify_intent(state: AgentState, config: RunnableConfig) -> dict[str
 
     result: dict[str, Any] = {
         "intent": intent,
+        "query_intent": query_intent,
         "intent_confidence": confidence,
         "trace_events": state.get("trace_events", []) + [trace],
     }

@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     # Agent (Phase 3)
     agent_enabled: bool = True
     agent_coverage_threshold: float = 0.6
-    agent_max_retries: int = 2
+    agent_max_retries: int = 1
     agent_grounding_threshold: float = 0.5
 
 

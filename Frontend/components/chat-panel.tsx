@@ -85,14 +85,14 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
       prev.map((item) =>
         item.id === liveId
           ? {
-              ...item,
-              content,
-              messageId: extra?.messageId ?? item.messageId,
-              citations: extra?.citations ?? item.citations,
-              abstained: extra?.abstained ?? item.abstained,
-              abstainReason: extra?.abstainReason ?? item.abstainReason,
-              followUpQuestions: extra?.followUpQuestions ?? item.followUpQuestions,
-            }
+            ...item,
+            content,
+            messageId: extra?.messageId ?? item.messageId,
+            citations: extra?.citations ?? item.citations,
+            abstained: extra?.abstained ?? item.abstained,
+            abstainReason: extra?.abstainReason ?? item.abstainReason,
+            followUpQuestions: extra?.followUpQuestions ?? item.followUpQuestions,
+          }
           : item
       )
     );
