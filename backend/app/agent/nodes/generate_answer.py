@@ -163,7 +163,7 @@ async def generate_answer(state: AgentState, config: RunnableConfig) -> dict[str
         resp = await _openai.chat.completions.create(
             model=settings.foreground_model,
             response_format={"type": "json_object"},
-            temperature=0.1, max_completion_tokens=1400,
+            temperature=0.1, max_completion_tokens=4000,
             messages=[
                 {"role": "system", "content": GENERATE_ANSWER_PROMPT},
                 {"role": "user", "content": f"Conversation so far:\n{hist_ctx}\n\nCurrent user question:\n{question}\n\nRetrieved sources:\n{src_ctx}"},
