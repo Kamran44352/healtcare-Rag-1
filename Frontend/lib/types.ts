@@ -34,6 +34,13 @@ export type IngestionListResponse = {
   offset: number;
 };
 
+export type CrawlRequest = {
+  url: string;
+  metadata: IngestionMetadata;
+  force_rescrape: boolean;
+  rescrape_interval_hours: number | null;
+};
+
 export type DocumentRecord = {
   document_id: string;
   filename: string;
@@ -43,6 +50,11 @@ export type DocumentRecord = {
   parser_provider: string | null;
   parser_warnings: unknown[];
   storage_path: string;
+  source_type: string;
+  source_url: string | null;
+  rescrape_interval_hours: number | null;
+  last_rescrape_at: string | null;
+  next_rescrape_at: string | null;
   created_at: string;
   latest_ingestion_id: string | null;
   latest_status: string | null;

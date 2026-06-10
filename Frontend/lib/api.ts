@@ -8,6 +8,7 @@ import type {
   IngestionCreated,
   IngestionMetadata,
   IngestionStatus,
+  CrawlRequest,
   RetrievalFilters,
   RetrievalProfile,
   RetrievalSearchResponse
@@ -54,6 +55,35 @@ export async function submitIngestion(
     baseUrl,
     method: "POST",
     body: form
+  });
+}
+
+export async function submitCrawl(
+  baseUrl: string,
+  url: string,
+  metadata: IngestionMetadata,
+  forceRescrape = false,
+  rescrapeIntervalHours: number | null = null
+) {
+  const payload: CrawlRequest = {
+    url,
+    metadata,
+    force_rescrape: forceRescrape,
+    rescrape_interval_hours: rescrapeIntervalHours,
+  };
+  return requestJson<IngestionCreated>("/v1/crawls", {
+    baseUrl,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listCrawls(baseUrl: string, limit = 200, offset = 0) {
+  return requestJson<DocumentListResponse>(`/v1/crawls?limit=${limit}&offset=${offset}`, {
+    baseUrl,
+    method: "GET",
+    cache: "no-store"
   });
 }
 

@@ -51,6 +51,43 @@ class IngestionQueue:
                 tenant_id=tenant_id,
             )
 
+    async def enqueue_url(
+        self,
+        ingestion_id: UUID,
+        document_id: UUID,
+        markdown: str,
+        filename: str,
+        user_metadata: dict,
+        tenant_id: UUID,
+    ) -> None:
+        task = asyncio.create_task(
+            self._run_url(ingestion_id, document_id, markdown, filename, user_metadata, tenant_id)
+        )
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(self._consume_task_result)
+
+    async def _run_url(
+        self,
+        ingestion_id: UUID,
+        document_id: UUID,
+        markdown: str,
+        filename: str,
+        user_metadata: dict,
+        tenant_id: UUID,
+    ) -> None:
+        from app.pipeline.orchestrator import run_url_pipeline
+
+        async with self._sem:
+            await run_url_pipeline(
+                ingestion_id=ingestion_id,
+                document_id=document_id,
+                markdown=markdown,
+                filename=filename,
+                user_metadata=user_metadata,
+                tenant_id=tenant_id,
+            )
+
     @staticmethod
     def _consume_task_result(task: asyncio.Task[None]) -> None:
         try:

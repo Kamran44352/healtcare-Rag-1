@@ -23,6 +23,7 @@ async def list_documents(limit: int = 50, offset: int = 0):
         await db.table("documents_with_status")
         .select("*")
         .eq("tenant_id", str(tenant_id))
+        .eq("source_type", "pdf")  # web sources are listed separately via /v1/crawls
         .order("created_at", desc=True)
         .range(offset, offset + limit - 1)
         .execute()

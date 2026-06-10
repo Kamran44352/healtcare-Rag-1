@@ -15,7 +15,8 @@ from app.db import close_db, get_db
 from app.qdrant import set_qdrant, get_qdrant  # noqa: F401 — re-exported for convenience
 from app.retrieval.cache import close_retrieval_cache
 from app.retrieval.reranker import close_reranker
-from app.routers import chat, documents, health, ingestions, retrieval
+from app.routers import chat, crawls, documents, health, ingestions, retrieval
+from app.scheduler import start_scheduler, stop_scheduler
 
 # Payload fields we filter on — must be indexed in Qdrant
 _PAYLOAD_INDEXES = {
@@ -73,8 +74,12 @@ async def lifespan(app: FastAPI):
         await client.scroll(collection_name=settings.qdrant_collection, limit=1)
     except Exception:
         pass
-        
+
+    # Start the scheduled auto re-scrape loop for web sources
+    start_scheduler()
+
     yield
+    await stop_scheduler()
     await close_reranker()
     await close_retrieval_cache()
     await client.close()
@@ -93,6 +98,7 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(ingestions.router, prefix="/v1")
+app.include_router(crawls.router, prefix="/v1")
 app.include_router(documents.router, prefix="/v1")
 app.include_router(chat.router, prefix="/v1")
 app.include_router(retrieval.router, prefix="/v1")

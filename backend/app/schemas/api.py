@@ -24,6 +24,16 @@ class IngestionCreated(BaseModel):
     reused_existing_document: bool
 
 
+# ── Web crawl (Firecrawl single-page scrape) ────────────────────────────────
+
+class CrawlRequest(BaseModel):
+    url: str = Field(min_length=1, max_length=2000)
+    metadata: IngestionMetadata = Field(default_factory=IngestionMetadata)
+    force_rescrape: bool = False
+    # Auto re-scrape cadence in hours; null/0 = no scheduled re-scrape.
+    rescrape_interval_hours: int | None = Field(default=None, ge=0, le=8760)
+
+
 class IngestionStatus(BaseModel):
     ingestion_id: UUID
     document_id: UUID | None
@@ -50,6 +60,11 @@ class DocumentRecord(BaseModel):
     parser_provider: str | None
     parser_warnings: list[Any]
     storage_path: str
+    source_type: str = "pdf"
+    source_url: str | None = None
+    rescrape_interval_hours: int | None = None
+    last_rescrape_at: datetime | None = None
+    next_rescrape_at: datetime | None = None
     created_at: datetime
     latest_ingestion_id: UUID | None
     latest_status: str | None
