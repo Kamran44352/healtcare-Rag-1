@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   CheckCircle2,
   ChevronDown,
@@ -22,7 +22,11 @@ import { Label } from "@/components/ui/label";
 import { deleteDocument, getIngestion, listDocuments, listIngestions, submitIngestion } from "@/lib/api";
 import type { IngestionStatus } from "@/lib/types";
 
-type IngestionPanelProps = { baseUrl: string };
+type IngestionPanelProps = {
+  baseUrl: string;
+  slotAfterUpload?: ReactNode;
+  slotAfterLibrary?: ReactNode;
+};
 
 type DocMeta = {
   title?: string;
@@ -71,6 +75,7 @@ function stageLabel(stage: string | null) {
   const map: Record<string, string> = {
     queued: "Queued",
     parsing: "Parsing PDF…",
+    scraping: "Scraping page…",
     quality_check: "Quality Check…",
     extracting_metadata: "Extracting Metadata…",
     chunking: "Chunking…",
@@ -147,7 +152,7 @@ function JobSkeletonRows() {
   );
 }
 
-export function IngestionPanel({ baseUrl }: IngestionPanelProps) {
+export function IngestionPanel({ baseUrl, slotAfterUpload, slotAfterLibrary }: IngestionPanelProps) {
   const [file, setFile] = useState<File | null>(null);
   const [pdfUrl, setPdfUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -357,6 +362,9 @@ export function IngestionPanel({ baseUrl }: IngestionPanelProps) {
         </CardContent>
       </Card>
 
+      {/* ── Crawl Website (slot) ──────────────────────────────────── */}
+      {slotAfterUpload}
+
       {/* ── Documents Library ─────────────────────────────────────── */}
       <Card className="border-primary/20">
         <CardHeader className="border-b border-border/50 pb-4">
@@ -564,6 +572,9 @@ export function IngestionPanel({ baseUrl }: IngestionPanelProps) {
           )}
         </CardContent>
       </Card>
+
+      {/* ── Website Crawls (slot) ─────────────────────────────────── */}
+      {slotAfterLibrary}
 
       {/* ── Ingestion Jobs ────────────────────────────────────────── */}
       <Card className="border-primary/20">

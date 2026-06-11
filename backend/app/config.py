@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     # OpenAI
     openai_api_key: str
 
+    # Firecrawl (website crawling — single page scrape)
+    firecrawl_api_key: str | None = None
+    firecrawl_api_url: str = "https://api.firecrawl.dev"
+    firecrawl_timeout_seconds: int = 120
+
     # LlamaParse
     llama_cloud_api_key: str
     llama_parse_tier: str = "agentic"
@@ -42,6 +47,11 @@ class Settings(BaseSettings):
     default_tenant_id: UUID = UUID("00000000-0000-0000-0000-000000000000")
     ingestion_concurrency: int = 3
     cors_origins: str = "*"
+
+    # Scheduled auto re-scrape (web sources only)
+    rescrape_enabled: bool = True
+    rescrape_check_interval_seconds: int = 900  # how often the loop wakes to look for due URLs
+    rescrape_default_interval_hours: int = 24  # default cadence applied to new crawls (0 = off)
 
     # Models
     foreground_model: str = "gpt-5.4-mini"
