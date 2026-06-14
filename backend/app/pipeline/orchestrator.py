@@ -431,7 +431,20 @@ async def create_url_ingestion_job(
         doc_id = UUID(existing[0]["document_id"])
         unchanged = existing[0]["sha256_hash"] == sha
 
-        if unchanged and not force_rescrape:
+        # Only treat unchanged content as a true skip if the prior ingestion
+        # actually produced chunks. A doc that failed mid-pipeline keeps its
+        # content hash but has no chunks — re-index it to self-heal.
+        already_indexed = bool(
+            (
+                await db.table("parent_chunks")
+                .select("chunk_id")
+                .eq("document_id", str(doc_id))
+                .limit(1)
+                .execute()
+            ).data
+        )
+
+        if unchanged and already_indexed and not force_rescrape:
             log.info("[A/url] No change for %s — skipping re-index (document_id=%s)", url, doc_id)
             ing_id = uuid4()
             await db.table("ingestions").insert({
@@ -449,6 +462,13 @@ async def create_url_ingestion_job(
                 "rescrape_interval_hours": rescrape_interval_hours,
             }).eq("document_id", str(doc_id)).execute()
             return ing_id, doc_id, True, False
+
+        if unchanged and not already_indexed:
+            log.info(
+                "[A/url] %s unchanged but has no chunks (prior attempt failed) — re-indexing "
+                "to recover (document_id=%s)",
+                url, doc_id,
+            )
 
         # Content changed (or forced) → replace chunks/vectors in place.
         log.info("[A/url] Content changed for %s — re-indexing document_id=%s", url, doc_id)

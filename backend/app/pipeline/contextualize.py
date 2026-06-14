@@ -53,6 +53,7 @@ async def _generate_prefixes(
         ],
         temperature=0,
         max_tokens=2048,
+        timeout=settings.llm_call_timeout_seconds,
     )
     raw = json.loads(response.choices[0].message.content)
     # Handle {"prefixes": [...]} or any dict containing a list, or bare list

@@ -30,8 +30,9 @@ class Settings(BaseSettings):
     qdrant_url: str
     qdrant_api_key: str
     qdrant_collection: str = "healthcare_chunks"
-    qdrant_request_timeout_seconds: int = 30
+    qdrant_request_timeout_seconds: int = 60
     qdrant_retrieval_timeout_seconds: int = 20
+    qdrant_write_concurrency: int = 4  # max simultaneous Qdrant upserts across all pipelines
 
     # Supabase
     supabase_url: str
@@ -45,7 +46,9 @@ class Settings(BaseSettings):
 
     # App
     default_tenant_id: UUID = UUID("00000000-0000-0000-0000-000000000000")
-    ingestion_concurrency: int = 3
+    ingestion_concurrency: int = 3          # PDF pipeline slots
+    url_ingestion_concurrency: int = 8      # URL pipeline slots (separate, lighter jobs)
+    llm_call_timeout_seconds: int = 60      # per-call timeout for OpenAI stage calls
     cors_origins: str = "*"
 
     # Scheduled auto re-scrape (web sources only)
