@@ -63,6 +63,7 @@ async def _enrich_batch(
         ],
         temperature=0,
         max_tokens=2048,
+        timeout=settings.llm_call_timeout_seconds,
     )
     raw = json.loads(response.choices[0].message.content)
     if isinstance(raw, dict):

@@ -12,6 +12,7 @@ log = logging.getLogger("clintel.queue")
 class IngestionQueue:
     def __init__(self):
         self._sem = asyncio.Semaphore(settings.ingestion_concurrency)
+        self._url_sem = asyncio.Semaphore(settings.url_ingestion_concurrency)
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def enqueue(
@@ -78,7 +79,7 @@ class IngestionQueue:
     ) -> None:
         from app.pipeline.orchestrator import run_url_pipeline
 
-        async with self._sem:
+        async with self._url_sem:
             await run_url_pipeline(
                 ingestion_id=ingestion_id,
                 document_id=document_id,

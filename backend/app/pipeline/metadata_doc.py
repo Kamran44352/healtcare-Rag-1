@@ -68,6 +68,7 @@ async def _call_llm(text: str) -> dict:
             {"role": "user", "content": f"Document:\n\n{text}"},
         ],
         temperature=0,
+        timeout=settings.llm_call_timeout_seconds,
     )
     return json.loads(response.choices[0].message.content)
 

@@ -90,6 +90,10 @@ export function useCrawls(baseUrl: string) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
+  const [bulkUrls, setBulkUrls] = useState("");
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; errors: string[] } | null>(null);
+
   const sortedCrawls = useMemo(
     () => Object.values(crawls).sort((a, b) => b.created_at.localeCompare(a.created_at)),
     [crawls]
@@ -191,6 +195,49 @@ export function useCrawls(baseUrl: string) {
     }
   };
 
+  const submitBulk = async () => {
+    const urls = bulkUrls
+      .split(/[\n,]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (!urls.length || bulkSubmitting) return;
+
+    setBulkSubmitting(true);
+    const errors: string[] = [];
+    setBulkProgress({ current: 0, total: urls.length, errors });
+
+    for (let i = 0; i < urls.length; i++) {
+      setBulkProgress({ current: i + 1, total: urls.length, errors: [...errors] });
+      try {
+        const created = await submitCrawl(
+          baseUrl,
+          urls[i],
+          { category: null, reference: null, guideline_title: null, pdf_url: null },
+          false,
+          intervalHours
+        );
+        if (!isTerminal(created.status)) void trackJob(created.ingestion_id);
+      } catch {
+        errors.push(urls[i]);
+      }
+      void refresh();
+    }
+
+    const succeeded = urls.length - errors.length;
+    if (errors.length === 0) {
+      toast.success(`All ${urls.length} URL${urls.length > 1 ? "s" : ""} queued for crawling`);
+    } else if (succeeded > 0) {
+      toast.warning(`${succeeded}/${urls.length} URLs queued — ${errors.length} failed`);
+    } else {
+      toast.error(`All ${urls.length} URLs failed to crawl`);
+    }
+
+    setBulkUrls("");
+    setBulkProgress(null);
+    setBulkSubmitting(false);
+    void refresh();
+  };
+
   const onDelete = async (doc: DocumentRecord) => {
     if (!window.confirm(`Delete "${doc.filename}"?\n\nThis removes the page, all chunks, and Qdrant vectors.`)) return;
     setBusyId(doc.document_id);
@@ -214,63 +261,164 @@ export function useCrawls(baseUrl: string) {
     url, setUrl, intervalHours, setIntervalHours, submitting, submit,
     refreshing, initialLoading, refresh,
     sortedCrawls, busyId, expandedId, setExpandedId, onRescrape, onDelete,
+    bulkUrls, setBulkUrls, bulkSubmitting, bulkProgress, submitBulk,
   };
 }
 
 // ── Form card (place below "Upload Document") ───────────────────────────────
 
 export function CrawlForm({ crawl }: { crawl: CrawlController }) {
-  const { url, setUrl, intervalHours, setIntervalHours, submitting, submit } = crawl;
+  const {
+    url, setUrl, intervalHours, setIntervalHours, submitting, submit,
+    bulkUrls, setBulkUrls, bulkSubmitting, bulkProgress, submitBulk,
+  } = crawl;
+
+  const [mode, setMode] = useState<"single" | "bulk">("single");
+
   return (
     <Card className="border-primary/20">
       <CardHeader className="border-b border-border/50 pb-4">
         <CardTitle className="text-base font-semibold text-primary">Crawl Website</CardTitle>
         <CardDescription>
-          Scrape a single web page (the exact URL only — no other pages are followed). Content is
-          chunked, embedded, and indexed just like an uploaded PDF.
+          Scrape web pages — content is chunked, embedded, and indexed just like an uploaded PDF.
         </CardDescription>
       </CardHeader>
-      <CardContent className="pt-5">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-end">
-          <div className="flex-1 space-y-1.5">
-            <Label htmlFor="crawl-url">
-              Page URL <span className="text-destructive">*</span>
-            </Label>
-            <Input
-              id="crawl-url"
-              type="url"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://www.nice.org.uk/guidance/ng136/chapter/recommendations"
-              className="font-mono text-sm"
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="crawl-interval">Auto re-scrape</Label>
-            <select
-              id="crawl-interval"
-              value={intervalHours}
-              onChange={(e) => setIntervalHours(Number(e.target.value))}
-              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm sm:w-48"
+      <CardContent className="pt-5 space-y-4">
+        {/* Mode toggle */}
+        <div className="flex gap-1 rounded-lg bg-secondary/60 p-1 w-fit">
+          {(["single", "bulk"] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setMode(m)}
+              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                mode === m
+                  ? "bg-background shadow text-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
             >
-              {INTERVAL_OPTIONS.map((o) => (
-                <option key={o.hours} value={o.hours}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
+              {m === "single" ? "Single URL" : "Multiple URLs"}
+            </button>
+          ))}
         </div>
-        <div className="mt-4">
-          <Button
-            onClick={() => void submit()}
-            disabled={!url.trim() || submitting}
-            className="bg-accent hover:bg-accent/90 text-white"
-          >
-            <Globe className="h-4 w-4" />
-            {submitting ? "Crawling…" : "Crawl Page"}
-          </Button>
-        </div>
+
+        {mode === "single" ? (
+          <>
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-end">
+              <div className="flex-1 space-y-1.5">
+                <Label htmlFor="crawl-url">
+                  Page URL <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  id="crawl-url"
+                  type="url"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder="https://www.nice.org.uk/guidance/ng136/chapter/recommendations"
+                  className="font-mono text-sm"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="crawl-interval">Auto re-scrape</Label>
+                <select
+                  id="crawl-interval"
+                  value={intervalHours}
+                  onChange={(e) => setIntervalHours(Number(e.target.value))}
+                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm sm:w-48"
+                >
+                  {INTERVAL_OPTIONS.map((o) => (
+                    <option key={o.hours} value={o.hours}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <Button
+              onClick={() => void submit()}
+              disabled={!url.trim() || submitting}
+              className="bg-accent hover:bg-accent/90 text-white"
+            >
+              <Globe className="h-4 w-4" />
+              {submitting ? "Crawling…" : "Crawl Page"}
+            </Button>
+          </>
+        ) : (
+          <>
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+              <div className="flex-1 space-y-1.5">
+                <Label htmlFor="crawl-bulk-urls">
+                  URLs <span className="text-destructive">*</span>
+                  <span className="ml-1 text-xs font-normal text-muted-foreground">
+                    (comma or newline separated)
+                  </span>
+                </Label>
+                <textarea
+                  id="crawl-bulk-urls"
+                  value={bulkUrls}
+                  onChange={(e) => setBulkUrls(e.target.value)}
+                  disabled={bulkSubmitting}
+                  placeholder={
+                    "https://example.com/page1,\nhttps://example.com/page2,\nhttps://example.com/page3"
+                  }
+                  rows={5}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y disabled:opacity-50"
+                />
+                <p className="text-xs text-muted-foreground">
+                  {bulkUrls.trim()
+                    ? `${bulkUrls.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean).length} URL(s) detected`
+                    : "Each URL is scraped and indexed one by one."}
+                </p>
+              </div>
+              <div className="space-y-1.5 sm:w-48">
+                <Label htmlFor="crawl-bulk-interval">Auto re-scrape</Label>
+                <select
+                  id="crawl-bulk-interval"
+                  value={intervalHours}
+                  onChange={(e) => setIntervalHours(Number(e.target.value))}
+                  className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+                >
+                  {INTERVAL_OPTIONS.map((o) => (
+                    <option key={o.hours} value={o.hours}>{o.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {bulkProgress && (
+              <div className="rounded-md border border-border/50 bg-secondary/30 px-4 py-3 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-medium text-foreground">
+                    Processing {bulkProgress.current} of {bulkProgress.total}…
+                  </span>
+                  <span className="text-muted-foreground">
+                    {bulkProgress.errors.length > 0 && `${bulkProgress.errors.length} failed`}
+                  </span>
+                </div>
+                <div className="h-1.5 w-full rounded-full bg-border overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-accent transition-all duration-300"
+                    style={{ width: `${(bulkProgress.current / bulkProgress.total) * 100}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            <Button
+              onClick={() => void submitBulk()}
+              disabled={
+                !bulkUrls.trim() ||
+                bulkSubmitting ||
+                bulkUrls.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean).length === 0
+              }
+              className="bg-accent hover:bg-accent/90 text-white"
+            >
+              <Globe className="h-4 w-4" />
+              {bulkSubmitting
+                ? bulkProgress
+                  ? `Crawling ${bulkProgress.current}/${bulkProgress.total}…`
+                  : "Starting…"
+                : "Crawl All URLs"}
+            </Button>
+          </>
+        )}
       </CardContent>
     </Card>
   );

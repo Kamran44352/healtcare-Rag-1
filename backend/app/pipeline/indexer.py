@@ -1,17 +1,62 @@
 from __future__ import annotations
+import asyncio
+import logging
 from uuid import UUID
 
+import httpx
 from fastembed import SparseTextEmbedding
 from qdrant_client import AsyncQdrantClient
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import PointStruct, SparseVector
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.config import settings
 from app.db import get_db
 from app.pipeline.chunking import ChildChunk, ParentChunk
 from app.schemas.healthcare_metadata import DocumentMetadata
 
+log = logging.getLogger("clintel.pipeline")
+
 _QDRANT_BATCH = 100
 _sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
+
+# Cap concurrent Qdrant writes across all in-flight pipelines. Many pipelines
+# upserting at once over one shared HTTP/2 connection triggers stream resets
+# (PROTOCOL_ERROR) and read timeouts on Qdrant Cloud. Serialising to a small
+# number keeps each request healthy while still allowing parallel ingestion.
+_qdrant_write_sem = asyncio.Semaphore(settings.qdrant_write_concurrency)
+
+
+def _is_transient_qdrant_error(exc: BaseException) -> bool:
+    """Retry network-level Qdrant failures (timeouts, HTTP/2 stream resets,
+    connection drops) and 5xx responses — but never client (4xx) errors."""
+    if isinstance(exc, (ResponseHandlingException, httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    if isinstance(exc, UnexpectedResponse):
+        return exc.status_code >= 500
+    return False
+
+
+@retry(
+    retry=retry_if_exception(_is_transient_qdrant_error),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=1, min=2, max=20),
+    before_sleep=before_sleep_log(log, logging.WARNING),
+    reraise=True,
+)
+async def _upsert_batch(qdrant: AsyncQdrantClient, batch: list[PointStruct]) -> None:
+    async with _qdrant_write_sem:
+        await qdrant.upsert(
+            collection_name=settings.qdrant_collection,
+            points=batch,
+            wait=True,
+        )
 
 
 def _build_sparse(text: str) -> SparseVector:
@@ -89,11 +134,7 @@ async def index_document(
     ]
 
     for i in range(0, len(points), _QDRANT_BATCH):
-        await qdrant.upsert(
-            collection_name=settings.qdrant_collection,
-            points=points[i : i + _QDRANT_BATCH],
-            wait=True,
-        )
+        await _upsert_batch(qdrant, points[i : i + _QDRANT_BATCH])
 
     # ── Stage J.2: Postgres parent_chunks ────────────────────────────────
     parent_rows = [
