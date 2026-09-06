@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
 
-from openai import AsyncOpenAI
+from app.llm import openai_client
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
@@ -9,7 +9,7 @@ from app.config import settings
 if TYPE_CHECKING:
     from app.pipeline.chunking import ChildChunk
 
-_client = AsyncOpenAI(api_key=settings.openai_api_key)
+_client = openai_client
 _BATCH_SIZE = 96
 
 

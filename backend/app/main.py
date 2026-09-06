@@ -1,5 +1,6 @@
+import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
@@ -12,8 +13,12 @@ from qdrant_client.models import (
 
 from app.config import settings
 from app.db import close_db, get_db
+from app.logging_config import configure_logging
+from app.observability import flush_tracers, log_tracing_status
 from app.pipeline.crawl_worker import start_crawl_worker, stop_crawl_worker
 from app.qdrant import set_qdrant, get_qdrant  # noqa: F401 — re-exported for convenience
+from app.redis_client import close_redis_client
+from app.request_context import set_request_id
 from app.retrieval.cache import close_retrieval_cache
 from app.retrieval.reranker import close_reranker
 from app.routers import chat, crawls, documents, health, ingestions, retrieval
@@ -61,6 +66,8 @@ async def _ensure_qdrant_collection(client: AsyncQdrantClient) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging()
+    log_tracing_status()
     client = AsyncQdrantClient(
         url=settings.qdrant_url,
         api_key=settings.qdrant_api_key,
@@ -82,15 +89,44 @@ async def lifespan(app: FastAPI):
     start_crawl_worker()
 
     yield
+
+    # Stop producers of new work first, then flush traces, then tear down the
+    # connections those traces and workers depend on.
     await stop_crawl_worker()
     await stop_scheduler()
+    # Long-lived background tasks buffer their spans; without an explicit flush
+    # they're dropped when Railway sends SIGTERM.
+    await flush_tracers()
     await close_reranker()
     await close_retrieval_cache()
+    await close_redis_client()
     await client.close()
     await close_db()
 
 
 app = FastAPI(title="Clintel Backend", version="0.1.0", lifespan=lifespan)
+
+_access_log = logging.getLogger("clintel.http")
+
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    """Attach a correlation id to every request.
+
+    The id flows into all `clintel.*` log lines (via a contextvar, so background
+    tasks spawned by the request inherit it) and into LangSmith run metadata, so
+    a log line and a trace can be joined. An inbound `X-Request-Id` is honoured
+    so an upstream proxy's id wins; otherwise one is minted.
+    """
+    request_id = set_request_id(request.headers.get("X-Request-Id"))
+    try:
+        response = await call_next(request)
+    except Exception:
+        _access_log.exception("%s %s failed", request.method, request.url.path)
+        raise
+    response.headers["X-Request-Id"] = request_id
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,

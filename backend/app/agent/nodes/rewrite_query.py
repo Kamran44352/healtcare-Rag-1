@@ -7,17 +7,19 @@ import logging
 import time
 from typing import Any
 
-from openai import AsyncOpenAI
+from app.llm import chat_completion
 from langchain_core.runnables import RunnableConfig
+
+from app.observability import traces_under_node
 
 from app.agent.prompts import REWRITE_QUERY_PROMPT
 from app.agent.state import AgentState
 from app.config import settings
 
 log = logging.getLogger("clintel.agent.rewrite_query")
-_openai = AsyncOpenAI(api_key=settings.openai_api_key)
 
 
+@traces_under_node
 async def rewrite_query(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     """Rewrite the retrieval query to target uncovered facets."""
     q = config.get("configurable", {}).get("event_queue")
@@ -31,7 +33,7 @@ async def rewrite_query(state: AgentState, config: RunnableConfig) -> dict[str, 
     started = time.perf_counter()
 
     try:
-        response = await _openai.chat.completions.create(
+        response = await chat_completion(
             model=settings.background_model,
             temperature=0.2,
             max_completion_tokens=150,

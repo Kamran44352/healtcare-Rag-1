@@ -30,7 +30,26 @@ Classify the user's question into exactly one category:
   even if the question is short. "What is tunnel vision?", "What is IOP?",
   "Define glaucoma" are clinical_query, not needs_clarification.
 - **greeting**: Hello, hi, thanks, goodbye, pleasantries.
-- **out_of_scope**: Non-medical questions (coding, recipes, general knowledge, etc.)
+- **out_of_scope**: ONLY questions with no connection whatsoever to medicine,
+  healthcare, or the life sciences — e.g. programming, recipes, sports, travel,
+  finance, celebrity trivia, the weather.
+  CRITICAL NEGATIVE GUARD — the following are NEVER out_of_scope:
+  - The history, evolution, or timeline of a medical field, technology, treatment
+    or profession. "Historical evolution of AI in ophthalmology", "history of
+    cataract surgery", "how has glaucoma management changed" are clinical_query.
+  - Research, evidence, epidemiology, prevalence, statistics, or study methodology
+    in medicine ("how common is diabetic retinopathy?").
+  - Medical technology, imaging, devices, or AI/ML applied to a clinical specialty
+    ("how is OCT used in glaucoma?", "AI for diabetic retinopathy screening").
+  - Medical education, training, professional practice, guidelines bodies, or
+    health policy.
+  - Anatomy, physiology, pharmacology, pathology, or basic science underpinning
+    a condition.
+  If a medical specialty, condition, drug, procedure, anatomical structure, or
+  body system is named ANYWHERE in the question, it is clinical_query — not
+  out_of_scope. Whether the corpus happens to cover it is retrieval's job to
+  determine, not yours. When genuinely unsure, choose clinical_query and lower
+  your confidence rather than refusing.
 - **clarification**: User is asking the system to clarify, rephrase, or elaborate
   on its previous answer (e.g. "what do you mean by that?", "explain point 2").
 
@@ -45,6 +64,11 @@ If the intent is clinical_query, also return a "query_intent" field indicating t
 - "prognosis" (e.g. "What is the outcome?", "survival rate", "complications")
 - "investigations" (e.g. "What tests to order?", "imaging", "blood work")
 - "general" (if it doesn't clearly fit the above sub-categories)
+
+Calibrate "confidence" honestly — it gates the decision downstream. Reserve
+confidence above 0.9 for out_of_scope for cases you are certain have nothing to
+do with medicine or health at all. If there is any plausible medical reading of
+the question, report a lower confidence.
 
 Return ONLY valid JSON:
 {

@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import json
 import logging
+import random
 from uuid import UUID
 
 from app.config import settings
 from app.db import get_db
+from app.observability import (
+    TRACE_HEADER_FIELD,
+    current_trace_headers,
+    trace_context_from_headers,
+    traceable,
+)
 from app.pipeline.orchestrator import IngestionError, create_url_ingestion_job
 from app.pipeline.scraper import ScrapeError, scrape_url
 from app.queue import get_queue
-from app.redis_client import get_redis_client
+from app.redis_client import get_queue_redis_client
+from app.request_context import new_context_id
 from app.schemas.api import IngestionMetadata
 
 log = logging.getLogger("clintel.crawl_worker")
@@ -38,13 +47,20 @@ async def enqueue_item(item_id: UUID) -> bool:
     item that doesn't get picked up in time, so durability never depends on this
     call succeeding.
     """
-    client = await get_redis_client()
+    client = await get_queue_redis_client()
     if client is None:
         return False
     try:
+        fields: dict[str, str] = {"item_id": str(item_id)}
+        # Carry the caller's trace context through the stream so the worker can
+        # re-parent to it — otherwise the trace ends at XADD and the item's
+        # ingestion shows up as an unrelated root run.
+        headers = current_trace_headers()
+        if headers:
+            fields[TRACE_HEADER_FIELD] = json.dumps(headers)
         await client.xadd(
             stream_key(),
-            {"item_id": str(item_id)},
+            fields,
             maxlen=settings.crawl_stream_maxlen,
             approximate=True,
         )
@@ -92,12 +108,19 @@ async def dispatch_item(item_id: UUID) -> None:
     by the reconciliation sweep (recovery dispatch)."""
     ok = await enqueue_item(item_id)
     if not ok:
-        asyncio.create_task(_process_item(item_id, "reconciler-direct"))
+        # Same bounded path the dispatcher uses, so a Redis outage can't spawn
+        # an unbounded number of concurrent pipelines (a 500-URL batch would
+        # otherwise fan out 500 tasks at once).
+        _spawn_item(item_id, "reconciler-direct", None)
 
 
 # ── Per-item processing ───────────────────────────────────────────────────────
 
+@traceable(run_type="chain", name="crawl_item")
 async def _process_item(item_id: UUID, consumer_name: str) -> None:
+    # Give every item its own correlation id so all the log lines it produces
+    # (scrape, parse, chunk, embed, index) can be grepped as one unit of work.
+    new_context_id("crawl")
     db = await get_db()
 
     # Atomic conditional claim — race-safe against duplicate delivery (a retry
@@ -111,7 +134,12 @@ async def _process_item(item_id: UUID, consumer_name: str) -> None:
         .execute()
     )
     if not claimed.data:
-        return  # already handled elsewhere — nothing to do
+        # Lost the claim race (duplicate delivery, or the reconciliation sweep
+        # racing a live worker). A no-op by design, but log it at debug — it was
+        # previously a completely silent return, which made duplicate-delivery
+        # behaviour impossible to observe.
+        log.debug("[BULK] %s: item %s already claimed elsewhere", consumer_name, item_id)
+        return
 
     item = claimed.data[0]
     url = item["url"]
@@ -222,16 +250,76 @@ async def _process_item(item_id: UUID, consumer_name: str) -> None:
         # unconditionally, regardless of what happened to this one.
 
 
-# ── Consumer loop ─────────────────────────────────────────────────────────────
+# ── Dispatcher ────────────────────────────────────────────────────────────────
+#
+# ONE task reads the stream; processing concurrency is enforced by a semaphore
+# instead of by the number of readers. The previous design ran N blocking
+# consumers, which meant N Upstash connections were permanently parked inside a
+# blocking XREADGROUP — starving the pool that the retrieval cache also used, and
+# producing a continuous timeout/warning loop even with an empty stream.
 
-async def _consumer(consumer_name: str, stop_event: asyncio.Event) -> None:
-    client = await get_redis_client()
+# Bounds how many items are processed at once. Deliberately the same knob as
+# before (`url_ingestion_concurrency`), so the effective concurrency is unchanged
+# — only the number of held Redis connections drops, from N to 1.
+_worker_sem: asyncio.Semaphore | None = None
+_inflight: set[asyncio.Task[None]] = set()
+
+
+def _get_worker_sem() -> asyncio.Semaphore:
+    """The concurrency gate, created on first use.
+
+    Lazily built because `dispatch_item` can run from a request handler before
+    (or without) `start_crawl_worker` — e.g. when Redis is down and the router
+    falls back to direct processing.
+    """
+    global _worker_sem
+    if _worker_sem is None:
+        _worker_sem = asyncio.Semaphore(max(1, settings.url_ingestion_concurrency))
+    return _worker_sem
+
+
+async def _run_item(item_id: UUID, consumer_name: str, headers: dict[str, str] | None) -> None:
+    """Process one item under the concurrency semaphore, re-parented to the
+    trace that enqueued it."""
+    async with _get_worker_sem():
+        try:
+            with trace_context_from_headers(headers):
+                await _process_item(item_id, consumer_name)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("[BULK] Unhandled error processing item %s", item_id)
+
+
+def _spawn_item(item_id: UUID, consumer_name: str, headers: dict[str, str] | None) -> None:
+    task = asyncio.create_task(_run_item(item_id, consumer_name, headers))
+    # Hold a strong reference: asyncio only keeps weak refs to running tasks, so
+    # an unreferenced task can be garbage-collected mid-flight.
+    _inflight.add(task)
+    task.add_done_callback(_inflight.discard)
+
+
+async def _dispatcher(stop_event: asyncio.Event) -> None:
+    client = await get_queue_redis_client()
     if client is None:
-        log.warning("[BULK] Consumer %s exiting — Redis unavailable", consumer_name)
+        log.warning("[BULK] Dispatcher exiting — Redis unavailable (Postgres reconciliation still active)")
         return
 
+    try:
+        from redis.exceptions import TimeoutError as RedisTimeoutError
+    except Exception:  # pragma: no cover
+        RedisTimeoutError = ()  # type: ignore[assignment]
+
     await _ensure_group(client)
-    log.info("[BULK] Consumer started: %s", consumer_name)
+    consumer_name = "dispatcher-0"
+    log.info(
+        "[BULK] Dispatcher started (block=%dms, max concurrent items=%d)",
+        settings.crawl_stream_block_ms,
+        settings.url_ingestion_concurrency,
+    )
+
+    backoff = settings.crawl_stream_error_backoff_base_seconds
+    consecutive_errors = 0
 
     while not stop_event.is_set():
         try:
@@ -239,15 +327,37 @@ async def _consumer(consumer_name: str, stop_event: asyncio.Event) -> None:
                 groupname=settings.crawl_stream_consumer_group,
                 consumername=consumer_name,
                 streams={stream_key(): ">"},
-                count=1,
-                block=5000,
+                # Drain up to a full concurrency window per read instead of one
+                # message per round trip.
+                count=max(1, settings.url_ingestion_concurrency),
+                block=settings.crawl_stream_block_ms,
             )
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            log.warning("[BULK] %s: xreadgroup failed: %s", consumer_name, exc)
-            await asyncio.sleep(2)
+        except RedisTimeoutError:
+            # EXPECTED, not an error: a blocking read that reaches its window
+            # with no messages is the normal idle path. Treating this as a
+            # failure (warn + sleep) is what produced the ~7s warning loop.
+            log.debug("[BULK] xreadgroup idle timeout — no messages")
             continue
+        except Exception as exc:
+            consecutive_errors += 1
+            # Log the first failure and then only on backoff escalation, so a
+            # sustained outage cannot flood the log the way it did before.
+            if consecutive_errors == 1 or backoff >= settings.crawl_stream_error_backoff_max_seconds:
+                log.warning(
+                    "[BULK] xreadgroup failed (%d consecutive): %s — retrying in %.1fs",
+                    consecutive_errors, exc, backoff,
+                )
+            # Jitter so multiple replicas don't reconnect in lockstep.
+            await asyncio.sleep(backoff * (0.5 + random.random()))
+            backoff = min(backoff * 2, settings.crawl_stream_error_backoff_max_seconds)
+            continue
+
+        if consecutive_errors:
+            log.info("[BULK] Stream read recovered after %d consecutive errors", consecutive_errors)
+            consecutive_errors = 0
+            backoff = settings.crawl_stream_error_backoff_base_seconds
 
         if not resp:
             continue
@@ -262,8 +372,8 @@ async def _consumer(consumer_name: str, stop_event: asyncio.Event) -> None:
                 # in Postgres, so acking early can never lose a URL.
                 try:
                     await client.xack(stream_key(), settings.crawl_stream_consumer_group, message_id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("[BULK] xack failed for %s: %s", message_id, exc)
 
                 raw_item_id = fields.get("item_id")
                 if not raw_item_id:
@@ -271,21 +381,30 @@ async def _consumer(consumer_name: str, stop_event: asyncio.Event) -> None:
                 try:
                     item_id = UUID(raw_item_id)
                 except ValueError:
+                    log.warning("[BULK] Skipping message %s — malformed item_id %r", message_id, raw_item_id)
                     continue
 
-                try:
-                    await _process_item(item_id, consumer_name)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    log.exception("[BULK] Unhandled error processing item %s", item_id)
+                headers: dict[str, str] | None = None
+                raw_headers = fields.get(TRACE_HEADER_FIELD)
+                if raw_headers:
+                    try:
+                        headers = json.loads(raw_headers)
+                    except Exception:
+                        headers = None
 
-    log.info("[BULK] Consumer stopped: %s", consumer_name)
+                # Hand off without awaiting, so the dispatcher goes straight back
+                # to reading. The semaphore inside `_run_item` is what caps
+                # actual concurrency.
+                _spawn_item(item_id, consumer_name, headers)
+
+    log.info("[BULK] Dispatcher stopped")
 
 
 # ── Reconciliation sweep (Postgres-only safety net) ──────────────────────────
 
+@traceable(run_type="chain", name="crawl_reconcile")
 async def _reconcile_once() -> None:
+    new_context_id("reconcile")
     db = await get_db()
     now = datetime.datetime.utcnow()
     queued_cutoff = (now - datetime.timedelta(seconds=settings.crawl_batch_queued_grace_seconds)).isoformat()
@@ -406,17 +525,28 @@ def start_crawl_worker() -> None:
         return
 
     _stop_event = asyncio.Event()
-    n = max(1, settings.url_ingestion_concurrency)
-    for i in range(n):
-        _tasks.append(asyncio.create_task(_consumer(f"worker-{i}", _stop_event)))
+    _get_worker_sem()
+    _tasks.append(asyncio.create_task(_dispatcher(_stop_event)))
     _tasks.append(asyncio.create_task(_reconcile_loop(_stop_event)))
-    log.info("[BULK] Crawl worker started (%d consumers)", n)
+    log.info("[BULK] Crawl worker started")
 
 
 async def stop_crawl_worker() -> None:
     global _tasks, _stop_event
     if _stop_event is not None:
         _stop_event.set()
+
+    # Let in-flight items finish rather than cancelling them mid-pipeline — an
+    # item cancelled while 'processing' would sit there until the staleness
+    # sweep reclaims it (up to crawl_batch_stale_processing_seconds later).
+    if _inflight:
+        log.info("[BULK] Waiting for %d in-flight item(s) to finish", len(_inflight))
+        done, pending = await asyncio.wait(set(_inflight), timeout=30)
+        if pending:
+            log.warning("[BULK] %d item(s) still running at shutdown — cancelling", len(pending))
+            for task in pending:
+                task.cancel()
+
     for task in _tasks:
         task.cancel()
     for task in _tasks:

@@ -8,26 +8,55 @@ from uuid import UUID
 from langgraph.graph import StateGraph, END
 
 from app.agent.state import AgentState
-from app.agent.nodes.classify_intent import classify_intent
-from app.agent.nodes.extract_filters import extract_filters
+from app.agent.nodes.analyze_question import analyze_question
 from app.agent.nodes.retrieve import retrieve_node
 from app.agent.nodes.grade_chunks import grade_chunks
 from app.agent.nodes.rewrite_query import rewrite_query
 from app.agent.nodes.generate_answer import generate_answer
 from app.agent.nodes.verify_grounding import verify_grounding
 from app.config import settings
+from app.observability import run_metadata
 
 log = logging.getLogger("clintel.agent.graph")
+
+
+def _run_config(
+    *,
+    question: str,
+    session_id: UUID,
+    tenant_id: UUID,
+    streaming: bool,
+    extra_configurable: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the RunnableConfig for one agent run.
+
+    Without this the run lands in LangSmith unnamed and with no metadata, which
+    makes it impossible to filter traces by session or tenant — the main thing
+    you want when debugging a specific user's bad answer. LangGraph attaches the
+    7 nodes as child runs automatically.
+    """
+    config: dict[str, Any] = {
+        "run_name": "clintel_agent",
+        "tags": ["agent", "stream" if streaming else "invoke"],
+        "metadata": run_metadata(
+            session_id=str(session_id),
+            tenant_id=str(tenant_id),
+            question=question[:200],
+        ),
+    }
+    if extra_configurable:
+        config["configurable"] = extra_configurable
+    return config
 
 
 # ── Routing functions ──────────────────────────────────────────────────────
 
 def route_after_intent(state: AgentState) -> str:
-    """Route after classify_intent: short-circuit or proceed to extraction."""
+    """Route after analyze_question: short-circuit or proceed to retrieval."""
     intent = state.get("intent", "clinical_query")
     if intent in ("greeting", "out_of_scope", "needs_clarification"):
         return "short_circuit"
-    return "extract_filters"
+    return "retrieve"
 
 
 def route_after_grading(state: AgentState) -> str:
@@ -45,7 +74,7 @@ def route_after_grading(state: AgentState) -> str:
     # Sufficient chunks retrieved — trust the reranker and proceed.
     # The broad profile with min_rerank_score=0.15 already filtered irrelevant content,
     # so 4+ chunks passing the reranker means we have useful evidence.
-    if chunk_count >= 4:
+    if chunk_count >= settings.agent_grading_skip_chunk_count:
         return "generate_answer"
 
     if coverage >= threshold:
@@ -63,8 +92,9 @@ def build_agent_graph() -> StateGraph:
     graph = StateGraph(AgentState)
 
     # Add nodes
-    graph.add_node("classify_intent", classify_intent)
-    graph.add_node("extract_filters", extract_filters)
+    # classify_intent and extract_filters live inside this one node so they can
+    # run concurrently — they have no data dependency on each other.
+    graph.add_node("analyze_question", analyze_question)
     graph.add_node("retrieve", retrieve_node)
     graph.add_node("grade_chunks", grade_chunks)
     graph.add_node("rewrite_query", rewrite_query)
@@ -72,18 +102,17 @@ def build_agent_graph() -> StateGraph:
     graph.add_node("verify_grounding", verify_grounding)
 
     # Entry point
-    graph.set_entry_point("classify_intent")
+    graph.set_entry_point("analyze_question")
 
     # Edges
     graph.add_conditional_edges(
-        "classify_intent",
+        "analyze_question",
         route_after_intent,
         {
-            "extract_filters": "extract_filters",
+            "retrieve": "retrieve",
             "short_circuit": END,
         },
     )
-    graph.add_edge("extract_filters", "retrieve")
     graph.add_edge("retrieve", "grade_chunks")
     graph.add_conditional_edges(
         "grade_chunks",
@@ -128,7 +157,12 @@ async def run_agent(
     }
 
     try:
-        result = await agent.ainvoke(initial_state)
+        result = await agent.ainvoke(
+            initial_state,
+            config=_run_config(
+                question=question, session_id=session_id, tenant_id=tenant_id, streaming=False
+            ),
+        )
         return result
     except Exception as exc:
         log.error("Agent graph failed: %s", exc, exc_info=True)
@@ -186,7 +220,13 @@ async def stream_agent_to_queue(
         async for state_snapshot in agent.astream(
             initial_state,
             stream_mode="values",
-            config={"configurable": {"event_queue": queue}}
+            config=_run_config(
+                question=question,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                streaming=True,
+                extra_configurable={"event_queue": queue},
+            ),
         ):
             final_state = state_snapshot
             all_traces = state_snapshot.get("trace_events", [])
@@ -210,7 +250,5 @@ async def stream_agent_to_queue(
 
     if final_state:
         await queue.put(("final", final_state))
-
-    await queue.put(("done", None))
 
     await queue.put(("done", None))

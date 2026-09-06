@@ -7,9 +7,11 @@ from uuid import UUID
 
 from app.config import settings
 from app.db import get_db
+from app.observability import traceable
 from app.pipeline.orchestrator import create_url_ingestion_job
 from app.pipeline.scraper import ScrapeError, scrape_url
 from app.queue import get_queue
+from app.request_context import new_context_id
 from app.schemas.api import IngestionMetadata
 
 log = logging.getLogger("clintel.scheduler")
@@ -46,7 +48,9 @@ async def _claim_due_documents() -> list[dict]:
     return claimed
 
 
+@traceable(run_type="chain", name="rescrape_document")
 async def _rescrape_one(doc: dict) -> None:
+    new_context_id("rescrape")
     url = doc["source_url"]
     interval = doc.get("rescrape_interval_hours") or settings.rescrape_default_interval_hours
     try:

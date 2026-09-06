@@ -9,6 +9,7 @@ import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import settings
+from app.observability import traceable
 
 _LLAMA_FILES_URL = "https://api.cloud.llamaindex.ai/api/v1/files"
 _LLAMA_PARSE_V2_URL = "https://api.cloud.llamaindex.ai/api/v2/parse"
@@ -103,6 +104,7 @@ def _parse_job_payload(payload: dict[str, Any]) -> dict[str, Any]:
     retry=retry_if_exception(_should_retry_llama),
     reraise=True,
 )
+@traceable(run_type="tool", name="llamaparse")
 async def _llamaparse(pdf_bytes: bytes, filename: str) -> ParseResult:
     async with httpx.AsyncClient(timeout=_llama_timeout()) as client:
         upload_resp = await client.post(

@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
-from openai import AsyncOpenAI
+from app.llm import chat_completion
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
@@ -27,7 +27,6 @@ from app.schemas.api import (
 
 router = APIRouter()
 log = logging.getLogger("clintel.chat")
-_openai = AsyncOpenAI(api_key=settings.openai_api_key)
 
 _SOURCE_TAG_RE = re.compile(r"\[SOURCE\s+(\d+)\]", re.IGNORECASE)
 
@@ -201,7 +200,7 @@ async def _build_retrieval_query(question: str, history: list[dict[str, Any]]) -
         f"{str(m.get('role', 'user')).upper()}: {str(m['content'])[:500]}" for m in recent
     )
     try:
-        response = await _openai.chat.completions.create(
+        response = await chat_completion(
             model=settings.background_model, temperature=0.0, max_completion_tokens=150,
             messages=[
                 {"role": "system", "content": _QUERY_REWRITE_PROMPT},
@@ -232,7 +231,7 @@ def _sanitize_follow_ups(items: Any) -> list[str]:
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
 async def _generate_grounded_answer(*, question: str, history_context: str, source_context: str) -> dict[str, Any]:
-    response = await _openai.chat.completions.create(
+    response = await chat_completion(
         model=settings.foreground_model,
         response_format={"type": "json_object"},
         temperature=0.1, max_completion_tokens=1400,

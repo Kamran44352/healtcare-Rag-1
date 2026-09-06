@@ -4,7 +4,7 @@ import json
 import logging
 from typing import TYPE_CHECKING
 
-from openai import AsyncOpenAI
+from app.llm import chat_completion
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from app.pipeline.chunking import ChildChunk
 
 log = logging.getLogger("clintel.pipeline")
-_client = AsyncOpenAI(api_key=settings.openai_api_key)
 _LLM_BATCH = 20
 
 _SECTION_TYPES = (
@@ -48,7 +47,7 @@ async def _enrich_batch(
         {"index": i, "section": c.section_path, "text": c.text[:600]}
         for i, c in enumerate(batch)
     ]
-    response = await _client.chat.completions.create(
+    response = await chat_completion(
         model=settings.background_model,
         response_format={"type": "json_object"},
         messages=[

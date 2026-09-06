@@ -7,6 +7,7 @@ import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import settings
+from app.observability import traceable
 
 _FIRECRAWL_SCRAPE_PATH = "/v1/scrape"
 
@@ -86,6 +87,7 @@ async def _scrape_request(url: str) -> dict:
         return resp.json()
 
 
+@traceable(run_type="tool", name="firecrawl_scrape")
 async def scrape_url(url: str) -> ScrapeResult:
     """Scrape a single web page with Firecrawl and return its markdown.
 

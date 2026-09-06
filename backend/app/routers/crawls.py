@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
+from app.observability import trace_span
 from app.db import get_db
 from app.pipeline.crawl_worker import dispatch_item
 from app.pipeline.orchestrator import create_url_ingestion_job
@@ -108,6 +109,10 @@ async def list_crawls(limit: int = 100, offset: int = 0):
 
 @router.post("/crawls/bulk", response_model=BulkCrawlCreated)
 async def submit_bulk_crawl(req: BulkCrawlRequest):
+    # NOTE: do NOT put @traceable on a FastAPI route handler. It injects a
+    # `config` keyword-only parameter, which FastAPI then exposes as a public
+    # query parameter (verified against the generated OpenAPI schema). Use an
+    # explicit `trace_span(...)` inside the body instead.
     if not settings.firecrawl_api_key:
         raise HTTPException(status_code=503, detail="Firecrawl is not configured (set FIRECRAWL_API_KEY)")
     if len(req.urls) > settings.crawl_batch_max_urls:
@@ -183,8 +188,18 @@ async def submit_bulk_crawl(req: BulkCrawlRequest):
     inserted = (await db.table("crawl_batch_items").insert(rows).execute()).data or []
 
     queued_items = [r for r in inserted if r["status"] == "queued"]
-    for item in queued_items:
-        await dispatch_item(UUID(item["item_id"]))
+    # Dispatch inside a span so each item's trace context (carried through the
+    # Redis stream by enqueue_item) re-parents to this submission — a URL and
+    # the ingestion it eventually triggers on a worker show up as one trace.
+    with trace_span(
+        "bulk_crawl_submit",
+        batch_id=batch_id,
+        accepted_count=len(queued_items),
+        duplicate_count=duplicate_count,
+        total_submitted=len(req.urls),
+    ):
+        for item in queued_items:
+            await dispatch_item(UUID(item["item_id"]))
 
     log.info(
         "[BULK] Batch created  batch_id=%s  accepted=%d  duplicates=%d  submitted=%d",

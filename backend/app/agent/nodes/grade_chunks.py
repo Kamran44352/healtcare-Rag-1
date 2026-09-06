@@ -7,15 +7,16 @@ import logging
 import time
 from typing import Any
 
-from openai import AsyncOpenAI
+from app.llm import chat_completion
 from langchain_core.runnables import RunnableConfig
+
+from app.observability import traces_under_node
 
 from app.agent.prompts import GRADE_CHUNKS_PROMPT
 from app.agent.state import AgentState
 from app.config import settings
 
 log = logging.getLogger("clintel.agent.grade_chunks")
-_openai = AsyncOpenAI(api_key=settings.openai_api_key)
 
 
 def _build_chunk_summary(chunks: list[Any]) -> str:
@@ -31,6 +32,7 @@ def _build_chunk_summary(chunks: list[Any]) -> str:
     return "\n\n".join(blocks)
 
 
+@traces_under_node
 async def grade_chunks(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     """Grade how well retrieved chunks cover the user's question facets."""
     q = config.get("configurable", {}).get("event_queue")
@@ -59,11 +61,37 @@ async def grade_chunks(state: AgentState, config: RunnableConfig) -> dict[str, A
             "trace_events": state.get("trace_events", []) + [trace],
         }
 
+    # Skip grading when it cannot change the outcome. route_after_grading (graph.py)
+    # sends anything with >= agent_grading_skip_chunk_count chunks straight to
+    # generate_answer no matter what coverage says, because the reranker's score
+    # cutoff has already filtered irrelevant content. Grading anyway costs a full
+    # LLM round trip (~2s) purely to produce a number nothing reads.
+    if len(chunks) >= settings.agent_grading_skip_chunk_count and retries == 0:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        reason = (
+            f"Skipped grading — {len(chunks)} chunks passed the reranker threshold, "
+            f"which already routes straight to answer generation."
+        )
+        log.info("Coverage grading skipped (%d chunks) in %dms", len(chunks), elapsed_ms)
+        trace = {
+            "node": "grade_chunks",
+            "status": "done",
+            "ms": elapsed_ms,
+            "data": {"coverage_score": 1.0, "graded": False, "reason": reason},
+        }
+        return {
+            "coverage_score": 1.0,
+            "coverage_reasoning": reason,
+            "uncovered_facets": [],
+            "retries": retries,
+            "trace_events": state.get("trace_events", []) + [trace],
+        }
+
     chunk_summary = _build_chunk_summary(chunks)
 
     try:
-        response = await _openai.chat.completions.create(
-            model=settings.background_model,
+        response = await chat_completion(
+            model=settings.grading_model,
             temperature=0.0,
             max_completion_tokens=400,
             response_format={"type": "json_object"},

@@ -7,15 +7,15 @@ import logging
 import time
 from typing import Any
 
-from openai import AsyncOpenAI
 from langchain_core.runnables import RunnableConfig
+
 
 from app.agent.prompts import CLASSIFY_INTENT_PROMPT, GREETING_RESPONSE, OUT_OF_SCOPE_RESPONSE
 from app.agent.state import AgentState
 from app.config import settings
+from app.llm import chat_completion
 
 log = logging.getLogger("clintel.agent.classify_intent")
-_openai = AsyncOpenAI(api_key=settings.openai_api_key)
 
 
 def _build_classify_context(question: str, history: list[dict[str, Any]]) -> str:
@@ -53,8 +53,8 @@ async def classify_intent(state: AgentState, config: RunnableConfig) -> dict[str
     classify_input = _build_classify_context(question, history)
 
     try:
-        response = await _openai.chat.completions.create(
-            model=settings.background_model,
+        response = await chat_completion(
+            model=settings.classify_model,
             temperature=0.0,
             max_completion_tokens=200,
             response_format={"type": "json_object"},
@@ -78,12 +78,33 @@ async def classify_intent(state: AgentState, config: RunnableConfig) -> dict[str
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
 
+    # Fail open on low-confidence refusals. Routing an out_of_scope question
+    # sends it straight to END with no retrieval attempted at all, so a
+    # mislabelled question is unrecoverable for the user — and this is a small,
+    # cheap model making the call. Below the threshold we downgrade to a normal
+    # clinical query and let the evidence decide: if the corpus really has
+    # nothing, generate_answer abstains gracefully anyway. The cost of being
+    # wrong in this direction is one wasted retrieval; the other direction is a
+    # flat refusal to answer a legitimate clinical question.
+    downgraded_from: str | None = None
+    if intent == "out_of_scope" and confidence < settings.agent_out_of_scope_confidence:
+        downgraded_from = "out_of_scope"
+        intent = "clinical_query"
+        query_intent = query_intent or "general"
+        log.info(
+            "Low-confidence out_of_scope (%.2f < %.2f) — falling through to retrieval",
+            confidence, settings.agent_out_of_scope_confidence,
+        )
+
     # Build trace event
+    trace_data: dict[str, Any] = {"intent": intent, "confidence": confidence}
+    if downgraded_from:
+        trace_data["downgraded_from"] = downgraded_from
     trace = {
         "node": "classify_intent",
         "status": "done",
         "ms": elapsed_ms,
-        "data": {"intent": intent, "confidence": confidence},
+        "data": trace_data,
     }
 
     log.info("Intent classified: %s (%.2f) in %dms", intent, confidence, elapsed_ms)
@@ -117,7 +138,10 @@ async def classify_intent(state: AgentState, config: RunnableConfig) -> dict[str
             final_answer=OUT_OF_SCOPE_RESPONSE,
             final_abstained=True,
             final_abstain_reason="Question is outside clinical scope.",
-            final_confidence=1.0,
+            # The classifier's own confidence, not 1.0 — reporting a refusal as
+            # 100% confident is misleading in the UI, especially since this is
+            # the one branch that never looks at the corpus.
+            final_confidence=confidence,
             chunks=[],
             used_sources=[],
             grounding_verdict="skip",
@@ -140,7 +164,7 @@ async def classify_intent(state: AgentState, config: RunnableConfig) -> dict[str
             ),
             final_abstained=False,
             final_abstain_reason=None,
-            final_confidence=1.0,
+            final_confidence=confidence,
             chunks=[],
             used_sources=[],
             grounding_verdict="skip",
