@@ -56,6 +56,18 @@ class Settings(BaseSettings):
     rescrape_check_interval_seconds: int = 900  # how often the loop wakes to look for due URLs
     rescrape_default_interval_hours: int = 24  # default cadence applied to new crawls (0 = off)
 
+    # Bulk crawl (durable multi-URL submission via Postgres + Redis Streams)
+    crawl_batch_max_urls: int = 500                       # hard cap per bulk submission
+    crawl_batch_max_attempts: int = 5                     # per-URL attempts before permanent failure
+    crawl_batch_retry_backoff_base_seconds: int = 30      # first retry delay
+    crawl_batch_retry_backoff_max_seconds: int = 900      # backoff ceiling
+    crawl_batch_stale_processing_seconds: int = 600       # worker presumed dead past this — item requeued
+    crawl_batch_queued_grace_seconds: int = 30            # grace before reconciliation re-enqueues a 'queued' row
+    crawl_batch_reconciliation_interval_seconds: int = 90  # how often the Postgres safety-net sweep runs
+    crawl_stream_name: str = "crawl:url_queue"            # Redis stream key (prefixed with redis_key_prefix)
+    crawl_stream_consumer_group: str = "crawl_workers"
+    crawl_stream_maxlen: int = 100_000                    # approximate XADD MAXLEN trim
+
     # Models
     foreground_model: str = "gpt-5.4-mini"
     background_model: str = "gpt-4.1-mini"

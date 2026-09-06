@@ -1,7 +1,11 @@
 import type {
+  BulkCrawlCreated,
+  BulkCrawlRequest,
   ChatHistoryResponse,
   ChatResponse,
   ChatSessionResponse,
+  CrawlBatchStatus,
+  CrawlBatchSummary,
   DocumentDeleteResponse,
   DocumentListResponse,
   IngestionListResponse,
@@ -81,6 +85,41 @@ export async function submitCrawl(
 
 export async function listCrawls(baseUrl: string, limit = 200, offset = 0) {
   return requestJson<DocumentListResponse>(`/v1/crawls?limit=${limit}&offset=${offset}`, {
+    baseUrl,
+    method: "GET",
+    cache: "no-store"
+  });
+}
+
+export async function submitBulkCrawl(
+  baseUrl: string,
+  urls: string[],
+  metadata: IngestionMetadata,
+  rescrapeIntervalHours: number | null = null
+) {
+  const payload: BulkCrawlRequest = {
+    urls,
+    metadata,
+    rescrape_interval_hours: rescrapeIntervalHours,
+  };
+  return requestJson<BulkCrawlCreated>("/v1/crawls/bulk", {
+    baseUrl,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getBulkCrawlStatus(baseUrl: string, batchId: string) {
+  return requestJson<CrawlBatchStatus>(`/v1/crawls/bulk/${batchId}`, {
+    baseUrl,
+    method: "GET",
+    cache: "no-store"
+  });
+}
+
+export async function listBulkCrawlBatches(baseUrl: string, limit = 50, offset = 0) {
+  return requestJson<CrawlBatchSummary[]>(`/v1/crawls/bulk?limit=${limit}&offset=${offset}`, {
     baseUrl,
     method: "GET",
     cache: "no-store"

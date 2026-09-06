@@ -34,6 +34,54 @@ class CrawlRequest(BaseModel):
     rescrape_interval_hours: int | None = Field(default=None, ge=0, le=8760)
 
 
+class BulkCrawlRequest(BaseModel):
+    # Upper bound enforced at the router against settings.crawl_batch_max_urls
+    # (kept out of this schema so the cap has one source of truth: config.py).
+    urls: list[str] = Field(min_length=1)
+    metadata: IngestionMetadata = Field(default_factory=IngestionMetadata)
+    rescrape_interval_hours: int | None = Field(default=None, ge=0, le=8760)
+
+
+class BulkCrawlCreated(BaseModel):
+    batch_id: UUID
+    accepted_count: int
+    duplicate_count: int
+    total_submitted: int
+
+
+class CrawlBatchItemStatus(BaseModel):
+    item_id: UUID
+    url: str
+    normalized_url: str
+    status: str
+    ingestion_id: UUID | None
+    document_id: UUID | None
+    attempt_count: int
+    max_attempts: int
+    error_code: str | None
+    error_message: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class CrawlBatchSummary(BaseModel):
+    batch_id: UUID
+    total_count: int
+    duplicate_count: int
+    queued_count: int
+    processing_count: int
+    completed_count: int
+    failed_count: int
+    is_finished: bool
+    created_at: datetime
+    finished_at: datetime | None
+
+
+class CrawlBatchStatus(CrawlBatchSummary):
+    items: list[CrawlBatchItemStatus]
+
+
 class IngestionStatus(BaseModel):
     ingestion_id: UUID
     document_id: UUID | None

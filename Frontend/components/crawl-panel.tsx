@@ -15,8 +15,16 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { deleteDocument, getIngestion, listCrawls, submitCrawl } from "@/lib/api";
-import type { DocumentRecord } from "@/lib/types";
+import {
+  deleteDocument,
+  getBulkCrawlStatus,
+  getIngestion,
+  listBulkCrawlBatches,
+  listCrawls,
+  submitBulkCrawl,
+  submitCrawl,
+} from "@/lib/api";
+import type { CrawlBatchItemStatus, CrawlBatchStatus, CrawlBatchSummary, DocumentRecord } from "@/lib/types";
 
 const INTERVAL_OPTIONS: { label: string; hours: number }[] = [
   { label: "Off (no auto re-scrape)", hours: 0 },
@@ -24,6 +32,10 @@ const INTERVAL_OPTIONS: { label: string; hours: number }[] = [
   { label: "Weekly", hours: 168 },
   { label: "Monthly", hours: 720 },
 ];
+
+// Persists the in-flight bulk-crawl batch id across page reloads/tab closes —
+// the server owns the batch durably, this is just so the UI can find it again.
+const ACTIVE_BATCH_STORAGE_KEY = "clintel:active_crawl_batch_id";
 
 function statusVariant(status: string | null) {
   if (status === "completed") return "success" as const;
@@ -93,6 +105,7 @@ export function useCrawls(baseUrl: string) {
   const [bulkUrls, setBulkUrls] = useState("");
   const [bulkSubmitting, setBulkSubmitting] = useState(false);
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number; errors: string[] } | null>(null);
+  const bulkPollRef = useRef<number | null>(null);
 
   const sortedCrawls = useMemo(
     () => Object.values(crawls).sort((a, b) => b.created_at.localeCompare(a.created_at)),
@@ -124,11 +137,79 @@ export function useCrawls(baseUrl: string) {
     }
   };
 
+  const stopBulkPolling = () => {
+    if (bulkPollRef.current !== null) {
+      window.clearInterval(bulkPollRef.current);
+      bulkPollRef.current = null;
+    }
+  };
+
+  const clearActiveBatch = () => {
+    try {
+      window.localStorage.removeItem(ACTIVE_BATCH_STORAGE_KEY);
+    } catch {
+      // localStorage may be unavailable (private mode, etc.) — non-fatal.
+    }
+  };
+
+  const pollBulkBatch = async (batchId: string) => {
+    let status: CrawlBatchStatus;
+    try {
+      status = await getBulkCrawlStatus(baseUrl, batchId);
+    } catch {
+      // Batch no longer resolvable (deleted, wrong backend, etc.) — stop chasing it.
+      stopBulkPolling();
+      clearActiveBatch();
+      setBulkSubmitting(false);
+      setBulkProgress(null);
+      return;
+    }
+
+    setBulkProgress({
+      current: status.completed_count + status.failed_count,
+      total: status.total_count,
+      errors: status.items
+        .filter((i) => i.status === "failed")
+        .map((i) => `${i.url}: ${i.error_message ?? i.error_code ?? "failed"}`),
+    });
+
+    if (status.is_finished) {
+      stopBulkPolling();
+      clearActiveBatch();
+      setBulkSubmitting(false);
+      void refresh();
+      if (status.failed_count === 0) {
+        toast.success(`All ${status.total_count} URL${status.total_count > 1 ? "s" : ""} indexed successfully`);
+      } else if (status.completed_count > 0) {
+        toast.warning(`${status.completed_count}/${status.total_count} URLs indexed — ${status.failed_count} failed`);
+      } else {
+        toast.error(`All ${status.total_count} URLs failed to index`);
+      }
+      setBulkProgress(null);
+    }
+  };
+
+  const startBulkPolling = (batchId: string) => {
+    setBulkSubmitting(true);
+    stopBulkPolling();
+    void pollBulkBatch(batchId);
+    bulkPollRef.current = window.setInterval(() => void pollBulkBatch(batchId), 3000);
+  };
+
   useEffect(() => {
     void refresh();
+
+    try {
+      const activeBatchId = window.localStorage.getItem(ACTIVE_BATCH_STORAGE_KEY);
+      if (activeBatchId) startBulkPolling(activeBatchId);
+    } catch {
+      // localStorage may be unavailable — resume just won't happen this session.
+    }
+
     return () => {
       if (pollRef.current !== null) window.clearInterval(pollRef.current);
       pollRef.current = null;
+      stopBulkPolling();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [baseUrl]);
@@ -203,39 +284,30 @@ export function useCrawls(baseUrl: string) {
     if (!urls.length || bulkSubmitting) return;
 
     setBulkSubmitting(true);
-    const errors: string[] = [];
-    setBulkProgress({ current: 0, total: urls.length, errors });
-
-    for (let i = 0; i < urls.length; i++) {
-      setBulkProgress({ current: i + 1, total: urls.length, errors: [...errors] });
+    try {
+      // One request durably persists the whole list server-side — the browser
+      // can close immediately after this resolves; the server owns the rest.
+      const created = await submitBulkCrawl(
+        baseUrl,
+        urls,
+        { category: null, reference: null, guideline_title: null, pdf_url: null },
+        intervalHours
+      );
       try {
-        const created = await submitCrawl(
-          baseUrl,
-          urls[i],
-          { category: null, reference: null, guideline_title: null, pdf_url: null },
-          false,
-          intervalHours
-        );
-        if (!isTerminal(created.status)) void trackJob(created.ingestion_id);
+        window.localStorage.setItem(ACTIVE_BATCH_STORAGE_KEY, created.batch_id);
       } catch {
-        errors.push(urls[i]);
+        // Non-fatal — the batch still processes server-side, just won't resume
+        // in the UI after a reload.
       }
-      void refresh();
+      const parts = [`${created.accepted_count} URL${created.accepted_count === 1 ? "" : "s"} queued`];
+      if (created.duplicate_count > 0) parts.push(`${created.duplicate_count} duplicate(s) skipped`);
+      toast.success(parts.join(", "));
+      setBulkUrls("");
+      startBulkPolling(created.batch_id);
+    } catch (err) {
+      toast.error(`Bulk crawl submission failed: ${(err as Error).message}`);
+      setBulkSubmitting(false);
     }
-
-    const succeeded = urls.length - errors.length;
-    if (errors.length === 0) {
-      toast.success(`All ${urls.length} URL${urls.length > 1 ? "s" : ""} queued for crawling`);
-    } else if (succeeded > 0) {
-      toast.warning(`${succeeded}/${urls.length} URLs queued — ${errors.length} failed`);
-    } else {
-      toast.error(`All ${urls.length} URLs failed to crawl`);
-    }
-
-    setBulkUrls("");
-    setBulkProgress(null);
-    setBulkSubmitting(false);
-    void refresh();
   };
 
   const onDelete = async (doc: DocumentRecord) => {
@@ -579,6 +651,187 @@ export function CrawlList({ crawl }: { crawl: CrawlController }) {
                                 <MetaRow label="First crawled" value={fmt(doc.created_at)} />
                               </div>
                             </div>
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Bulk import history (past "Multiple URLs" batches) ───────────────────────
+
+function bulkStatusVariant(status: CrawlBatchSummary) {
+  if (!status.is_finished) return "warning" as const;
+  if (status.failed_count > 0 && status.completed_count === 0) return "destructive" as const;
+  if (status.failed_count > 0) return "warning" as const;
+  return "success" as const;
+}
+
+function bulkStatusLabel(status: CrawlBatchSummary) {
+  if (!status.is_finished) return `Processing ${status.completed_count + status.failed_count}/${status.total_count}`;
+  if (status.failed_count === 0) return "Completed";
+  if (status.completed_count === 0) return "Failed";
+  return "Completed with errors";
+}
+
+export type BulkBatchHistoryController = ReturnType<typeof useBulkBatchHistory>;
+
+export function useBulkBatchHistory(baseUrl: string) {
+  const [batches, setBatches] = useState<CrawlBatchSummary[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [items, setItems] = useState<Record<string, CrawlBatchItemStatus[]>>({});
+  const [itemsLoading, setItemsLoading] = useState<string | null>(null);
+
+  const refresh = async () => {
+    if (!baseUrl.trim()) return;
+    setRefreshing(true);
+    try {
+      const list = await listBulkCrawlBatches(baseUrl);
+      setBatches(Array.isArray(list) ? list : []);
+    } catch (err) {
+      toast.error(`Failed to load bulk import history: ${(err as Error).message}`);
+    } finally {
+      setRefreshing(false);
+      setInitialLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [baseUrl]);
+
+  const toggleExpand = async (batchId: string) => {
+    if (expandedId === batchId) {
+      setExpandedId(null);
+      return;
+    }
+    setExpandedId(batchId);
+    if (items[batchId]) return; // already loaded — lazy-load once per batch
+    setItemsLoading(batchId);
+    try {
+      const status = await getBulkCrawlStatus(baseUrl, batchId);
+      setItems((prev) => ({ ...prev, [batchId]: status.items }));
+    } catch (err) {
+      toast.error(`Failed to load batch detail: ${(err as Error).message}`);
+    } finally {
+      setItemsLoading(null);
+    }
+  };
+
+  return { batches, refreshing, initialLoading, refresh, expandedId, toggleExpand, items, itemsLoading };
+}
+
+export function BulkBatchHistory({ history }: { history: BulkBatchHistoryController }) {
+  const { batches, refreshing, initialLoading, refresh, expandedId, toggleExpand, items, itemsLoading } = history;
+
+  return (
+    <Card className="border-primary/20">
+      <CardHeader className="border-b border-border/50 pb-4">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <CardTitle className="text-base font-semibold text-primary">
+              Bulk Import History
+              {batches.length > 0 && (
+                <span className="ml-2 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-normal text-primary">
+                  {batches.length}
+                </span>
+              )}
+            </CardTitle>
+            <CardDescription>Past "Multiple URLs" submissions and their outcomes.</CardDescription>
+          </div>
+          <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={refreshing}>
+            <RefreshCcw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
+            {refreshing ? "Refreshing…" : "Refresh"}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent className="p-0">
+        {!initialLoading && !batches.length ? (
+          <div className="flex flex-col items-center gap-2 py-16 text-center">
+            <Globe className="h-10 w-10 text-muted-foreground/40" />
+            <p className="text-sm font-medium text-muted-foreground">No bulk imports yet.</p>
+            <p className="text-xs text-muted-foreground">Paste a list of URLs above under "Multiple URLs" to start.</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px] text-sm">
+              <thead>
+                <tr className="border-b border-border/60 bg-primary/5 text-left">
+                  <th className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-primary">Submitted</th>
+                  <th className="px-3 py-3 text-xs font-semibold uppercase tracking-wide text-primary">Status</th>
+                  <th className="px-3 py-3 text-xs font-semibold uppercase tracking-wide text-primary">Total</th>
+                  <th className="px-3 py-3 text-xs font-semibold uppercase tracking-wide text-primary">Completed</th>
+                  <th className="px-3 py-3 text-xs font-semibold uppercase tracking-wide text-primary">Failed</th>
+                  <th className="px-3 py-3 text-xs font-semibold uppercase tracking-wide text-primary">Duplicates</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/40">
+                {batches.map((batch) => {
+                  const isExpanded = expandedId === batch.batch_id;
+                  return (
+                    <>
+                      <tr
+                        key={batch.batch_id}
+                        className={`cursor-pointer transition-colors hover:bg-secondary/40 ${isExpanded ? "bg-secondary/50" : ""}`}
+                        onClick={() => void toggleExpand(batch.batch_id)}
+                      >
+                        <td className="px-4 py-3">
+                          <div className="flex items-center gap-2.5">
+                            {isExpanded ? (
+                              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-primary" />
+                            ) : (
+                              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                            )}
+                            <span className="text-xs font-medium">{fmt(batch.created_at)}</span>
+                          </div>
+                        </td>
+                        <td className="px-3 py-3">
+                          <Badge variant={bulkStatusVariant(batch)} className="text-xs">
+                            {bulkStatusLabel(batch)}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-3 text-xs text-foreground/80">{batch.total_count}</td>
+                        <td className="px-3 py-3 text-xs text-foreground/80">{batch.completed_count}</td>
+                        <td className="px-3 py-3 text-xs text-foreground/80">{batch.failed_count}</td>
+                        <td className="px-3 py-3 text-xs text-foreground/80">{batch.duplicate_count}</td>
+                      </tr>
+
+                      {isExpanded && (
+                        <tr key={`${batch.batch_id}-detail`} className="bg-secondary/20">
+                          <td colSpan={6} className="px-4 py-5">
+                            {itemsLoading === batch.batch_id ? (
+                              <p className="text-xs text-muted-foreground">Loading URLs…</p>
+                            ) : (
+                              <div className="space-y-2">
+                                {(items[batch.batch_id] ?? []).map((item) => (
+                                  <div key={item.item_id} className="flex min-w-0 items-start gap-3 border-b border-border/30 pb-2 last:border-0">
+                                    <Badge variant={statusVariant(item.status)} className="mt-0.5 shrink-0 text-xs">
+                                      {item.status}
+                                    </Badge>
+                                    <div className="min-w-0 flex-1">
+                                      <p className="break-all text-xs font-medium text-foreground">{item.url}</p>
+                                      {item.error_message && (
+                                        <p className="text-xs text-destructive">
+                                          [{item.error_code}] {item.error_message}
+                                          {item.max_attempts > 1 && ` (attempt ${item.attempt_count}/${item.max_attempts})`}
+                                        </p>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </td>
                         </tr>
                       )}

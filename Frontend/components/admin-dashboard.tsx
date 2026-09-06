@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Activity } from "lucide-react";
 import { toast } from "sonner";
 
-import { CrawlForm, CrawlList, useCrawls } from "@/components/crawl-panel";
+import { BulkBatchHistory, CrawlForm, CrawlList, useBulkBatchHistory, useCrawls } from "@/components/crawl-panel";
 import { IngestionPanel } from "@/components/ingestion-panel";
 import { Navbar } from "@/components/navbar";
 import { RetrievalPanel } from "@/components/retrieval-panel";
@@ -96,14 +96,21 @@ export function AdminDashboard() {
 }
 
 // Renders the document pipeline with the website-crawl cards interleaved:
-// Upload → Crawl Website → Documents Library → Website Crawls → Ingestion Jobs.
+// Upload → Crawl Website → Documents Library → Website Crawls → Bulk Import
+// History → Ingestion Jobs.
 function IngestionWithCrawls({ baseUrl }: { baseUrl: string }) {
   const crawl = useCrawls(baseUrl);
+  const bulkHistory = useBulkBatchHistory(baseUrl);
   return (
     <IngestionPanel
       baseUrl={baseUrl}
       slotAfterUpload={<CrawlForm crawl={crawl} />}
-      slotAfterLibrary={<CrawlList crawl={crawl} />}
+      slotAfterLibrary={
+        <>
+          <CrawlList crawl={crawl} />
+          <BulkBatchHistory history={bulkHistory} />
+        </>
+      }
     />
   );
 }

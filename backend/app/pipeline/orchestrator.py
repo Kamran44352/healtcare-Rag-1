@@ -444,6 +444,33 @@ async def create_url_ingestion_job(
             ).data
         )
 
+        # Postgres having chunk rows isn't proof the vectors are actually in
+        # Qdrant — a Qdrant-side wipe (e.g. a free-tier cluster reset after
+        # inactivity) leaves Postgres untouched, so the check above alone would
+        # keep saying "already indexed" forever and this self-heal path would
+        # never trigger. Confirm at least one point actually exists in Qdrant
+        # too; fail open (trust Postgres) on any Qdrant error so a transient
+        # network blip doesn't force an expensive reindex on every re-scrape.
+        if already_indexed:
+            try:
+                qdrant = get_qdrant()
+                count_result = await qdrant.count(
+                    collection_name=settings.qdrant_collection,
+                    count_filter=Filter(
+                        must=[FieldCondition(key="document_id", match=MatchValue(value=str(doc_id)))]
+                    ),
+                    exact=False,
+                )
+                if count_result.count == 0:
+                    already_indexed = False
+                    log.warning(
+                        "[A/url] %s has chunks in Postgres but no vectors in Qdrant "
+                        "(likely a Qdrant-side data loss) — re-indexing (document_id=%s)",
+                        url, doc_id,
+                    )
+            except Exception as exc:
+                log.warning("[A/url] Qdrant vector-presence check failed for %s (trusting Postgres): %s", doc_id, exc)
+
         if unchanged and already_indexed and not force_rescrape:
             log.info("[A/url] No change for %s — skipping re-index (document_id=%s)", url, doc_id)
             ing_id = uuid4()

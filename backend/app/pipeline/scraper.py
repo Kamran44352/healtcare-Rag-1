@@ -45,7 +45,12 @@ def normalize_url(url: str) -> str:
 def _should_retry(exc: BaseException) -> bool:
     if isinstance(exc, (httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.TimeoutException)):
         return True
-    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code >= 500
+    if isinstance(exc, httpx.HTTPStatusError):
+        # 429 is retried here too — most rate-limit blips clear within this
+        # function's own exponential backoff, well before it ever costs a bulk
+        # batch item one of its (Postgres-tracked) retry attempts.
+        return exc.response.status_code >= 500 or exc.response.status_code == 429
+    return False
 
 
 @retry(
