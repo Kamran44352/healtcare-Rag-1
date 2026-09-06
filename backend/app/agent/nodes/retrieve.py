@@ -8,6 +8,8 @@ from typing import Any
 from uuid import UUID
 from langchain_core.runnables import RunnableConfig
 
+from app.observability import traces_under_node
+
 from app.agent.state import AgentState
 from app.retrieval import RetrievalFilters
 from app.retrieval.retriever import retrieve, retrieve_multi
@@ -15,6 +17,7 @@ from app.retrieval.retriever import retrieve, retrieve_multi
 log = logging.getLogger("clintel.agent.retrieve")
 
 
+@traces_under_node
 async def retrieve_node(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     """Run the Phase 2 hybrid retrieval pipeline."""
     q = config.get("configurable", {}).get("event_queue")

@@ -6,6 +6,7 @@ import httpx
 from qdrant_client.http.models.models import ScoredPoint
 
 from app.config import settings
+from app.observability import traceable
 
 _timeout = httpx.Timeout(timeout=12.0, connect=5.0)
 _client = httpx.AsyncClient(base_url="https://api.cohere.com", timeout=_timeout)
@@ -15,6 +16,7 @@ def reranker_enabled() -> bool:
     return bool(settings.cohere_api_key)
 
 
+@traceable(run_type="tool", name="cohere_rerank")
 async def cohere_rerank(
     query: str,
     points: list[ScoredPoint],

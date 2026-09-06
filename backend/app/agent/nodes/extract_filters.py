@@ -13,15 +13,15 @@ import logging
 import time
 from typing import Any
 
-from openai import AsyncOpenAI
+from app.llm import chat_completion
 from langchain_core.runnables import RunnableConfig
+
 
 from app.agent.prompts import EXTRACT_FILTERS_PROMPT
 from app.agent.state import AgentState
 from app.config import settings
 
 log = logging.getLogger("clintel.agent.extract_filters")
-_openai = AsyncOpenAI(api_key=settings.openai_api_key)
 
 
 def _build_history_snippet(history: list[dict[str, Any]]) -> str:
@@ -63,8 +63,8 @@ async def extract_filters(state: AgentState, config: RunnableConfig) -> dict[str
     history_snippet = _build_history_snippet(history)
 
     try:
-        response = await _openai.chat.completions.create(
-            model=settings.background_model,
+        response = await chat_completion(
+            model=settings.rewrite_model,
             temperature=0.0,
             max_completion_tokens=200,
             response_format={"type": "json_object"},

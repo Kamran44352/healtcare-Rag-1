@@ -3,14 +3,15 @@
 from __future__ import annotations
 import json, logging, re, time
 from typing import Any
-from openai import AsyncOpenAI
+from app.llm import chat_completion
 from langchain_core.runnables import RunnableConfig
+
+from app.observability import traces_under_node
 from app.agent.prompts import GENERATE_ANSWER_PROMPT
 from app.agent.state import AgentState
 from app.config import settings
 
 log = logging.getLogger("clintel.agent.generate_answer")
-_openai = AsyncOpenAI(api_key=settings.openai_api_key)
 
 
 def _build_source_context(chunks: list[Any]) -> str:
@@ -141,6 +142,7 @@ def _expand_acronyms(text: str) -> str:
     return text
 
 
+@traces_under_node
 async def generate_answer(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     q = config.get("configurable", {}).get("event_queue")
     if q:
@@ -160,7 +162,7 @@ async def generate_answer(state: AgentState, config: RunnableConfig) -> dict[str
     hist_ctx = _build_history_context(history)
 
     try:
-        resp = await _openai.chat.completions.create(
+        resp = await chat_completion(
             model=settings.foreground_model,
             response_format={"type": "json_object"},
             temperature=0.1, max_completion_tokens=4000,

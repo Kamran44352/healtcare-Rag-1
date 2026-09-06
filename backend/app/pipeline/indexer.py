@@ -18,6 +18,7 @@ from tenacity import (
 
 from app.config import settings
 from app.db import get_db
+from app.observability import traceable
 from app.pipeline.chunking import ChildChunk, ParentChunk
 from app.schemas.healthcare_metadata import DocumentMetadata
 
@@ -50,6 +51,7 @@ def _is_transient_qdrant_error(exc: BaseException) -> bool:
     before_sleep=before_sleep_log(log, logging.WARNING),
     reraise=True,
 )
+@traceable(run_type="tool", name="qdrant_upsert")
 async def _upsert_batch(qdrant: AsyncQdrantClient, batch: list[PointStruct]) -> None:
     async with _qdrant_write_sem:
         await qdrant.upsert(

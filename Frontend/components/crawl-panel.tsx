@@ -748,7 +748,7 @@ export function BulkBatchHistory({ history }: { history: BulkBatchHistoryControl
                 </span>
               )}
             </CardTitle>
-            <CardDescription>Past "Multiple URLs" submissions and their outcomes.</CardDescription>
+            <CardDescription>Past &ldquo;Multiple URLs&rdquo; submissions and their outcomes.</CardDescription>
           </div>
           <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={refreshing}>
             <RefreshCcw className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
@@ -761,7 +761,7 @@ export function BulkBatchHistory({ history }: { history: BulkBatchHistoryControl
           <div className="flex flex-col items-center gap-2 py-16 text-center">
             <Globe className="h-10 w-10 text-muted-foreground/40" />
             <p className="text-sm font-medium text-muted-foreground">No bulk imports yet.</p>
-            <p className="text-xs text-muted-foreground">Paste a list of URLs above under "Multiple URLs" to start.</p>
+            <p className="text-xs text-muted-foreground">Paste a list of URLs above under &ldquo;Multiple URLs&rdquo; to start.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">

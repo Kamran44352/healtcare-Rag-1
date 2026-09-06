@@ -3,14 +3,15 @@
 from __future__ import annotations
 import json, logging, time, re
 from typing import Any
-from openai import AsyncOpenAI
+from app.llm import chat_completion
 from langchain_core.runnables import RunnableConfig
+
+from app.observability import traces_under_node
 from app.agent.prompts import VERIFY_GROUNDING_PROMPT
 from app.agent.state import AgentState
 from app.config import settings
 
 log = logging.getLogger("clintel.agent.verify_grounding")
-_openai = AsyncOpenAI(api_key=settings.openai_api_key)
 _SOURCE_RE = re.compile(r"\[SOURCE\s+(\d+)\]", re.IGNORECASE)
 
 
@@ -31,6 +32,7 @@ def _build_source_ref(chunks: list[Any], cited_indices: set[int]) -> str:
     return "\n\n".join(blocks)
 
 
+@traces_under_node
 async def verify_grounding(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     q = config.get("configurable", {}).get("event_queue")
     if q:
@@ -105,8 +107,8 @@ async def verify_grounding(state: AgentState, config: RunnableConfig) -> dict[st
     try:
         threshold_pct = int(settings.agent_grounding_threshold * 100)
         formatted_prompt = VERIFY_GROUNDING_PROMPT.format(threshold=threshold_pct)
-        resp = await _openai.chat.completions.create(
-            model=settings.background_model,
+        resp = await chat_completion(
+            model=settings.grounding_model,
             temperature=0.0, max_completion_tokens=1500,
             response_format={"type": "json_object"},
             messages=[

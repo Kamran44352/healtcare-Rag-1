@@ -3,7 +3,7 @@ import asyncio
 import json
 from typing import TYPE_CHECKING
 
-from openai import AsyncOpenAI
+from app.llm import chat_completion
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import settings
@@ -12,7 +12,6 @@ from app.schemas.healthcare_metadata import DocumentMetadata
 if TYPE_CHECKING:
     from app.pipeline.chunking import ParentChunk
 
-_client = AsyncOpenAI(api_key=settings.openai_api_key)
 _BATCH = 20  # parents per LLM call
 
 _SYSTEM_PROMPT = """Generate a brief contextual prefix (≤60 tokens) for each document chunk.
@@ -38,7 +37,7 @@ async def _generate_prefixes(
         }
         for i, p in enumerate(batch)
     ]
-    response = await _client.chat.completions.create(
+    response = await chat_completion(
         model=settings.background_model,
         response_format={"type": "json_object"},
         messages=[

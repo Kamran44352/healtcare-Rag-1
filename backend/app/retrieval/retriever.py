@@ -13,8 +13,9 @@ from qdrant_client.models import Fusion, FusionQuery, Prefetch
 from app.db import get_db
 from app.qdrant import get_qdrant
 from app.config import settings
+from app.observability import trace_span, traceable
 from app.retrieval.cache import get_retrieval_cache
-from app.retrieval.embedder import query_embed_dense, query_embed_sparse
+from app.retrieval.embedder import query_embed_dense, query_embed_dense_many, query_embed_sparse
 from app.retrieval.filters import build_qdrant_filter
 from app.retrieval.models import RetrievedChunk, RetrievalFilters, RetrievalProfile, RetrievalResult
 from app.retrieval.reranker import cohere_rerank, reranker_enabled
@@ -58,7 +59,23 @@ class RetrievalUnavailableError(Exception):
     pass
 
 
+# tenant_id -> (corpus_version, fetched_at_monotonic)
+_corpus_version_cache: dict[str, tuple[int, float]] = {}
+
+
+def invalidate_corpus_version_cache() -> None:
+    """Drop the cached corpus_version (call after indexing bumps it)."""
+    _corpus_version_cache.clear()
+
+
+@traceable(run_type="tool", name="corpus_version")
 async def _get_corpus_version(tenant_id: UUID) -> int:
+    key = str(tenant_id)
+    hit = _corpus_version_cache.get(key)
+    now = time.monotonic()
+    if hit is not None and (now - hit[1]) < settings.corpus_version_ttl_seconds:
+        return hit[0]
+
     db = await get_db()
     try:
         result = (
@@ -68,7 +85,9 @@ async def _get_corpus_version(tenant_id: UUID) -> int:
             .single()
             .execute()
         )
-        return int((result.data or {}).get("corpus_version", 1))
+        version = int((result.data or {}).get("corpus_version", 1))
+        _corpus_version_cache[key] = (version, now)
+        return version
     except Exception as exc:
         log.warning("Falling back to corpus_version=1: %s", exc)
         return 1
@@ -94,6 +113,7 @@ def _dedupe_best_child_per_parent(points: list[ScoredPoint]) -> list[ScoredPoint
     return sorted(best_by_parent.values(), key=lambda item: float(item.score or 0.0), reverse=True)
 
 
+@traceable(run_type="tool", name="fetch_parent_texts")
 async def _fetch_parent_texts(parent_ids: list[str]) -> dict[str, str]:
     if not parent_ids:
         return {}
@@ -138,6 +158,7 @@ def _build_retrieved_chunk(
     )
 
 
+@traceable(run_type="retriever", name="retrieve")
 async def retrieve(
     query: str,
     *,
@@ -188,19 +209,20 @@ async def retrieve(
     qdrant_filter = build_qdrant_filter(tenant_id, filters)
 
     try:
-        hybrid_response = await qdrant.query_points(
-            collection_name=settings.qdrant_collection,
-            prefetch=[
-                Prefetch(query=dense_vector, using="dense", limit=candidates),
-                Prefetch(query=sparse_vector, using="sparse", limit=candidates),
-            ],
-            query=FusionQuery(fusion=Fusion.RRF),
-            limit=candidates,
-            query_filter=qdrant_filter,
-            with_payload=True,
-            with_vectors=False,
-            timeout=settings.qdrant_retrieval_timeout_seconds,
-        )
+        with trace_span('qdrant_hybrid_search', queries=1, candidates=candidates):
+            hybrid_response = await qdrant.query_points(
+                collection_name=settings.qdrant_collection,
+                prefetch=[
+                    Prefetch(query=dense_vector, using="dense", limit=candidates),
+                    Prefetch(query=sparse_vector, using="sparse", limit=candidates),
+                ],
+                query=FusionQuery(fusion=Fusion.RRF),
+                limit=candidates,
+                query_filter=qdrant_filter,
+                with_payload=True,
+                with_vectors=False,
+                timeout=settings.qdrant_retrieval_timeout_seconds,
+            )
         deduped_points = _dedupe_best_child_per_parent(list(hybrid_response.points))
     except ResponseHandlingException as exc:
         raise RetrievalUnavailableError(
@@ -265,6 +287,7 @@ async def retrieve(
     return result
 
 
+@traceable(run_type="retriever", name="retrieve_multi")
 async def retrieve_multi(
     queries: list[str],
     rerank_query: str,
@@ -299,29 +322,25 @@ async def retrieve_multi(
             expand_parents=expand_parents,
         )
 
-    # 1. Parallel dense/sparse embedding for all queries
-    embed_tasks = []
-    for q in queries:
-        norm_q = q.strip()
-        if norm_q:
-            embed_tasks.append(query_embed_dense(norm_q))
-            embed_tasks.append(query_embed_sparse(norm_q))
-            
-    if not embed_tasks:
+    # 1. Embed every query variant. Dense goes as ONE batched API call rather
+    #    than one call per variant — previously the gather waited on the slowest
+    #    of N requests, and that tail was the single biggest chunk of retrieval
+    #    latency. Sparse is local CPU, so per-query is already cheap.
+    norm_queries = [q.strip() for q in queries if q.strip()]
+    if not norm_queries:
         return RetrievalResult(chunks=[], query_ms=0, corpus_version=corpus_version, cache_hit=False)
 
-    embed_results = await asyncio.gather(*embed_tasks)
+    dense_vectors, sparse_vectors = await asyncio.gather(
+        query_embed_dense_many(norm_queries),
+        asyncio.gather(*(query_embed_sparse(q) for q in norm_queries)),
+    )
     
     # 2. Parallel Qdrant queries
     qdrant = get_qdrant()
     qdrant_filter = build_qdrant_filter(tenant_id, filters)
     
     qdrant_tasks = []
-    # embed_results alternates [dense0, sparse0, dense1, sparse1, ...]
-    for i in range(0, len(embed_results), 2):
-        dense_vec = embed_results[i]
-        sparse_vec = embed_results[i+1]
-        
+    for dense_vec, sparse_vec in zip(dense_vectors, sparse_vectors):
         task = qdrant.query_points(
             collection_name=settings.qdrant_collection,
             prefetch=[
@@ -338,7 +357,8 @@ async def retrieve_multi(
         qdrant_tasks.append(task)
         
     try:
-        qdrant_results = await asyncio.gather(*qdrant_tasks)
+        with trace_span('qdrant_hybrid_search', queries=len(qdrant_tasks), candidates=candidates):
+            qdrant_results = await asyncio.gather(*qdrant_tasks)
     except ResponseHandlingException as exc:
         raise RetrievalUnavailableError(
             "Hybrid Qdrant search timed out. Increase Qdrant timeout or improve Qdrant query latency."

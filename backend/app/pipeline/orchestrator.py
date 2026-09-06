@@ -9,6 +9,7 @@ from qdrant_client.models import FieldCondition, Filter, MatchValue
 
 from app.config import settings
 from app.db import get_db
+from app.observability import traceable
 from app.qdrant import get_qdrant
 from app.pipeline import (
     chunking,
@@ -25,11 +26,9 @@ from app.schemas.api import IngestionMetadata
 from app.storage import upload_markdown, upload_pdf
 
 log = logging.getLogger("clintel.pipeline")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-    datefmt="%H:%M:%S",
-)
+# NOTE: logging is configured explicitly by app.logging_config.configure_logging(),
+# called from main.py's lifespan. It used to be a basicConfig() side effect here,
+# which meant logging only worked because this module happened to be imported.
 
 
 class IngestionError(Exception):
@@ -58,6 +57,7 @@ async def _fail(ingestion_id: UUID, code: str, message: str) -> None:
 
 # ── Stages E→J (shared by PDF batches and URL pages) ────────────────────────
 
+@traceable(run_type="chain", name="stages_E_to_J")
 async def _index_markdown(
     ingestion_id: UUID,
     document_id: UUID,
@@ -158,6 +158,7 @@ async def _purge_document_chunks(document_id: UUID, tenant_id: UUID) -> None:
 
 # ── Stage A ───────────────────────────────────────────────────────────────
 
+@traceable(run_type="chain", name="stage_A_create_ingestion_job")
 async def create_ingestion_job(
     pdf_bytes: bytes,
     filename: str,
@@ -220,6 +221,7 @@ async def create_ingestion_job(
 
 # ── Stages B→K ────────────────────────────────────────────────────────────
 
+@traceable(run_type="chain", name="pdf_pipeline")
 async def run_pipeline(
     ingestion_id: UUID,
     document_id: UUID,
@@ -401,6 +403,7 @@ def _next_rescrape_at(interval_hours: int | None) -> str | None:
     return due.isoformat()
 
 
+@traceable(run_type="chain", name="stage_A_create_url_ingestion_job")
 async def create_url_ingestion_job(
     scrape: ScrapeResult,
     metadata: IngestionMetadata,
@@ -555,6 +558,7 @@ async def create_url_ingestion_job(
 
 # ── URL pipeline: quality gate → metadata → E-J → finalize ──────────────────
 
+@traceable(run_type="chain", name="url_pipeline")
 async def run_url_pipeline(
     ingestion_id: UUID,
     document_id: UUID,

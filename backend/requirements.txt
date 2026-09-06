@@ -15,5 +15,10 @@ cachetools>=5.3
 redis>=5.0
 certifi>=2024.0.0
 pymupdf>=1.24.0
-langgraph>=0.4
+# Agent + observability. langsmith and langchain-core were already installed as
+# langgraph transitives and are imported directly (RunnableConfig, @traceable),
+# so they're declared explicitly rather than left to resolve by accident.
+langgraph>=1.1
+langchain-core>=1.3
+langsmith>=0.8
 sse-starlette>=2.0

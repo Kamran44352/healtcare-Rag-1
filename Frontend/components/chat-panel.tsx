@@ -511,41 +511,10 @@ export function ChatPanel({ baseUrl }: ChatPanelProps) {
                     </button>
                   </div>
 
-                  {/* Box 3: Follow-up questions */}
-                  {!!message.followUpQuestions?.length ? (
-                    <div className="rounded-xl border-2 border-accent/60 bg-white px-5 py-4 shadow-sm">
-                      <p className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-foreground/60">
-                        Suggested follow-up questions
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {message.followUpQuestions.map((q) => (
-                          <button
-                            key={q}
-                            type="button"
-                            onClick={() => setQuestion(q)}
-                            className="rounded-lg border border-accent/40 bg-white px-3 py-2 text-left text-xs font-medium text-foreground transition-colors hover:border-accent/60 hover:bg-accent/5"
-                          >
-                            {q}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  ) : isLiveStreaming && hasCitations ? (
-                    <div className="rounded-xl border-2 border-accent/30 bg-white px-5 py-4 shadow-sm">
-                      <p className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-foreground/40">
-                        Suggested follow-up questions
-                      </p>
-                      <div className="flex flex-wrap gap-2">
-                        {[1, 2, 3].map((i) => (
-                          <div
-                            key={i}
-                            className="h-8 animate-pulse rounded-lg border border-accent/20 bg-accent/5"
-                            style={{ width: `${120 + i * 30}px` }}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
+                  {/* Box 3: Follow-up questions — hidden for now.
+                      The backend still generates them and they still arrive over SSE
+                      (`follow_up_questions_ready`) into `message.followUpQuestions`,
+                      so restoring this section is a pure UI change. */}
                 </div>
               </div>
             );
