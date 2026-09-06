@@ -9,6 +9,7 @@ from uuid import UUID
 from cachetools import TTLCache
 
 from app.config import settings
+from app.redis_client import close_redis_client, get_redis_client
 from app.retrieval.models import RetrievalFilters, RetrievalProfile, RetrievalResult
 
 log = logging.getLogger("clintel.retrieval")
@@ -28,38 +29,15 @@ def _hash_key(namespace: str, payload: Any) -> str:
 
 
 class _RedisStore:
-    def __init__(self) -> None:
-        self._client: Any = None
-        self._disabled = False
+    """Thin get/set wrapper over the shared Redis client (app.redis_client).
 
-    async def _get_client(self) -> Any | None:
-        if self._disabled or not settings.redis_url:
-            return None
-        if self._client is not None:
-            return self._client
-
-        try:
-            import redis.asyncio as redis
-        except Exception as exc:
-            log.warning("Redis package unavailable, using local cache fallback: %s", exc)
-            self._disabled = True
-            return None
-
-        try:
-            self._client = redis.from_url(
-                settings.redis_url,
-                encoding="utf-8",
-                decode_responses=True,
-            )
-        except Exception as exc:
-            log.warning("Redis client init failed, using local cache fallback: %s", exc)
-            self._disabled = True
-            return None
-
-        return self._client
+    Unlike the crawl queue, this store is allowed to silently degrade to the local
+    TTLCache — any failure to obtain a client or execute a command just means
+    "no shared cache this time", never an error surfaced to the caller.
+    """
 
     async def get(self, key: str) -> str | None:
-        client = await self._get_client()
+        client = await get_redis_client()
         if client is None:
             return None
         try:
@@ -69,7 +47,7 @@ class _RedisStore:
             return None
 
     async def set(self, key: str, value: str, ttl_seconds: int) -> None:
-        client = await self._get_client()
+        client = await get_redis_client()
         if client is None:
             return
         try:
@@ -78,11 +56,7 @@ class _RedisStore:
             log.warning("Redis set failed for %s: %s", key, exc)
 
     async def close(self) -> None:
-        if self._client is not None:
-            try:
-                await self._client.aclose()
-            finally:
-                self._client = None
+        await close_redis_client()
 
 
 _redis_store = _RedisStore()

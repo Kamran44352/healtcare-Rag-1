@@ -89,6 +89,32 @@ class IngestionQueue:
                 tenant_id=tenant_id,
             )
 
+    async def run_url_pipeline_bounded(
+        self,
+        ingestion_id: UUID,
+        document_id: UUID,
+        markdown: str,
+        filename: str,
+        user_metadata: dict,
+        tenant_id: UUID,
+    ) -> None:
+        """Like enqueue_url, but awaits completion under the shared _url_sem instead
+        of fire-and-forget. Used by the bulk crawl worker (app/pipeline/crawl_worker.py),
+        which needs to know when the pipeline actually finishes so it can record the
+        outcome on the batch item — and shares this semaphore so bulk crawling never
+        exceeds the same total URL-pipeline concurrency as manual crawls/re-scrape."""
+        from app.pipeline.orchestrator import run_url_pipeline
+
+        async with self._url_sem:
+            await run_url_pipeline(
+                ingestion_id=ingestion_id,
+                document_id=document_id,
+                markdown=markdown,
+                filename=filename,
+                user_metadata=user_metadata,
+                tenant_id=tenant_id,
+            )
+
     @staticmethod
     def _consume_task_result(task: asyncio.Task[None]) -> None:
         try:

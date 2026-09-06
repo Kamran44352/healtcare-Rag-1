@@ -41,6 +41,54 @@ export type CrawlRequest = {
   rescrape_interval_hours: number | null;
 };
 
+// ── Bulk web crawl (durable multi-URL submission) ───────────────────────────
+
+export type BulkCrawlRequest = {
+  urls: string[];
+  metadata: IngestionMetadata;
+  rescrape_interval_hours: number | null;
+};
+
+export type BulkCrawlCreated = {
+  batch_id: string;
+  accepted_count: number;
+  duplicate_count: number;
+  total_submitted: number;
+};
+
+export type CrawlBatchItemStatus = {
+  item_id: string;
+  url: string;
+  normalized_url: string;
+  status: string;
+  ingestion_id: string | null;
+  document_id: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type CrawlBatchSummary = {
+  batch_id: string;
+  total_count: number;
+  duplicate_count: number;
+  queued_count: number;
+  processing_count: number;
+  completed_count: number;
+  failed_count: number;
+  is_finished: boolean;
+  created_at: string;
+  finished_at: string | null;
+};
+
+export type CrawlBatchStatus = CrawlBatchSummary & {
+  items: CrawlBatchItemStatus[];
+};
+
 export type DocumentRecord = {
   document_id: string;
   filename: string;

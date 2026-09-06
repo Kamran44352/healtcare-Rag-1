@@ -12,6 +12,7 @@ from qdrant_client.models import (
 
 from app.config import settings
 from app.db import close_db, get_db
+from app.pipeline.crawl_worker import start_crawl_worker, stop_crawl_worker
 from app.qdrant import set_qdrant, get_qdrant  # noqa: F401 — re-exported for convenience
 from app.retrieval.cache import close_retrieval_cache
 from app.retrieval.reranker import close_reranker
@@ -77,8 +78,11 @@ async def lifespan(app: FastAPI):
 
     # Start the scheduled auto re-scrape loop for web sources
     start_scheduler()
+    # Start the durable bulk-crawl worker (Postgres + Redis Streams)
+    start_crawl_worker()
 
     yield
+    await stop_crawl_worker()
     await stop_scheduler()
     await close_reranker()
     await close_retrieval_cache()
